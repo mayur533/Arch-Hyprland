@@ -57,11 +57,9 @@ fi
 # --- Package Installation ---
 
 echo "Installing required packages..."
-# Combine similar packages to reduce pacman calls.
-# Group fonts for better readability.
-# Removed 'material-design-icons' from pacman -S as it's an AUR package.
+# Packages generally available in official Arch repositories
 PACMAN_PACKAGES=(
-    hyprland sddm waybar swaylock-effects kitty rofi google-chrome hyprpaper code gedit vlc nautilus
+    hyprland sddm waybar swaylock-effects kitty rofi gedit vlc nautilus dunst
     pulseaudio pulseaudio-alsa pavucontrol gnome-system-monitor blueman network-manager-applet libnotify
     power-profiles-daemon jq wget curl imagemagick grim slurp wl-clipboard brightnessctl
     bluez bluez-utils polkit-gnome xdg-desktop-portal-hyprland xdg-desktop-portal-gtk qt5-wayland qt6-wayland
@@ -76,10 +74,13 @@ fi
 echo "Core packages installed."
 
 echo "Installing additional AUR packages..."
+# Packages commonly found in the AUR (Arch User Repository)
 AUR_PACKAGES=(
-    material-design-icons # This was listed in pacman, but is an AUR package
-    rofi-power-menu
-    hyprpicker
+    google-chrome # Web browser, typically AUR
+    visual-studio-code-bin # VS Code binary, typically AUR
+    material-design-icons-git # Icons, commonly AUR
+    rofi-power-menu # Rofi plugin, commonly AUR
+    hyprpicker # Hyprland specific, commonly AUR
 )
 
 if ! sudo -u "$REAL_USER" yay -S --noconfirm "${AUR_PACKAGES[@]}"; then
@@ -147,7 +148,7 @@ cat > "$HYPRLAND_CONFIG_DIR/hyprland.conf" << EOL
 monitor=,preferred,auto,1
 
 # Autostart
-exec-once = $USER_HOME/.config/hypr/scripts/wallpaper.sh init
+exec-once = \$HOME/.config/hypr/scripts/wallpaper.sh init
 exec-once = waybar
 exec-once = /usr/lib/polkit-gnome/polkit-gnome-authentication-agent-1
 exec-once = nm-applet --indicator
@@ -244,7 +245,7 @@ windowrule = center, ^(nm-connection-editor)$
 bind = \$mainMod, RETURN, exec, kitty
 bind = \$mainMod, B, exec, google-chrome-stable
 bind = \$mainMod, E, exec, nautilus
-bind = \$mainMod, C, exec, code
+bind = \$mainMod, C, exec, code # Assuming 'code' executable for VS Code
 bind = \$mainMod, G, exec, gedit
 bind = \$mainMod, V, exec, vlc
 bind = \$mainMod, R, exec, rofi -show drun
@@ -341,8 +342,6 @@ SOURCES=(
     "https://source.unsplash.com/random/3840x2160/?abstract"
     "https://picsum.photos/3840/2160"
     "https://random.imagecdn.app/3840/2160"
-    # Note: wallhaven.cc/random might require parsing HTML or an API key,
-    # and directly downloading from it can be unreliable. Removed for simplicity.
 )
 
 # Function to check internet connection
@@ -355,7 +354,7 @@ download_wallpaper() {
     if ! check_internet; then
         echo "No internet connection. Using local wallpapers." >&2
         return 1
-    fi
+    }
 
     for source in "\${SOURCES[@]}"; do
         local filename="wallpaper_\$(date +%s).jpg"
