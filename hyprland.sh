@@ -12,7 +12,6 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 # Get the original user who invoked sudo for proper file ownership
-# This is more robust than relying on SUDO_USER directly, though SUDO_USER is generally fine.
 if [ -z "${SUDO_USER:-}" ]; then
     echo "Error: SUDO_USER environment variable not set. Please run with sudo." >&2
     exit 1
@@ -31,8 +30,6 @@ echo "Internet connection verified."
 # --- System Update and Yay Installation ---
 
 echo "Updating system..."
-# Use --noconfirm for unattended updates, but be aware of potential issues with broken packages.
-# It's generally better for user-facing scripts to prompt or use a custom mirrorlist if silent update is critical.
 pacman -Syu --noconfirm || { echo "Error: Failed to update system." >&2; exit 1; }
 
 # Install yay if not installed
@@ -40,7 +37,6 @@ if ! command -v yay &> /dev/null; then
     echo "Installing yay (AUR helper)..."
     pacman -S --needed --noconfirm git base-devel || { echo "Error: Failed to install git or base-devel." >&2; exit 1; }
 
-    # Use mktemp for secure temporary directory creation
     TEMP_DIR=$(mktemp -d -t yay-install-XXXXXXXX)
     echo "Cloning yay into $TEMP_DIR..."
     sudo -u "$REAL_USER" git clone https://aur.archlinux.org/yay.git "$TEMP_DIR/yay" || { echo "Error: Failed to clone yay repository." >&2; rm -rf "$TEMP_DIR"; exit 1; }
@@ -63,8 +59,9 @@ PACMAN_PACKAGES=(
     pulseaudio pulseaudio-alsa pavucontrol gnome-system-monitor blueman network-manager-applet libnotify
     power-profiles-daemon jq wget curl imagemagick grim slurp wl-clipboard brightnessctl
     bluez bluez-utils polkit-gnome xdg-desktop-portal-hyprland xdg-desktop-portal-gtk qt5-wayland qt6-wayland
-    python-pywal python-pip
-    noto-fonts noto-fonts-cjk noto-fonts-emoji ttf-jetbrains-mono ttf-font-awesome
+    python-pywal python-pip fastfetch # Added fastfetch
+    noto-fonts noto-fonts-cjk noto-fonts-emoji ttf-jetbrains-mono ttf-font-awesome # Font Awesome is for Waybar/Rofi icons
+    zsh # Added zsh
 )
 
 if ! pacman -S --noconfirm "${PACMAN_PACKAGES[@]}"; then
@@ -76,12 +73,15 @@ echo "Core packages installed."
 echo "Installing additional AUR packages..."
 # Packages commonly found in the AUR (Arch User Repository)
 AUR_PACKAGES=(
-    swaylock-effects # Moved from pacman to AUR
-    google-chrome # Web browser, typically AUR
-    visual-studio-code-bin # VS Code binary, typically AUR
-    material-design-icons-git # Icons, commonly AUR
-    rofi-power-menu # Rofi plugin, commonly AUR
-    hyprpicker # Hyprland specific, commonly AUR
+    swaylock-effects
+    google-chrome
+    visual-studio-code-bin
+    material-design-icons-git # Material Design Icons for Waybar/Rofi
+    rofi-power-menu
+    hyprpicker
+    zsh-theme-powerlevel10k-git # Powerlevel10k Zsh theme
+    oh-my-zsh-git # Oh My Zsh, P10k often relies on it
+    ttf-meslo-nerd-font-powerlevel10k # Recommended font for Powerlevel10k
 )
 
 if ! sudo -u "$REAL_USER" yay -S --noconfirm "${AUR_PACKAGES[@]}"; then
@@ -105,7 +105,6 @@ done
 # --- User Directories Creation ---
 
 echo "Creating user directories for $REAL_USER..."
-# This command should be run as the user, not root.
 sudo -u "$REAL_USER" xdg-user-dirs-update || { echo "Warning: Failed to update xdg user directories." >&2; }
 
 # --- Hyprland Configuration ---
@@ -120,6 +119,7 @@ KITTY_CONFIG_DIR="$USER_HOME/.config/kitty"
 WAL_CONFIG_DIR="$USER_HOME/.config/wal"
 NAUTILUS_SCRIPTS_DIR="$USER_HOME/.local/share/nautilus/scripts"
 WALLPAPER_DIR="$USER_HOME/Pictures/wallpapers"
+ZSH_CONFIG_DIR="$USER_HOME" # .zshrc is in home dir
 
 # Create directories and set ownership immediately
 declare -a config_dirs=(
@@ -149,6 +149,9 @@ cat > "$HYPRLAND_CONFIG_DIR/hyprland.conf" << EOL
 monitor=,preferred,auto,1
 
 # Autostart
+# Ensure hyprpaper is started cleanly and as a background process
+exec-once = killall -q hyprpaper && hyprpaper & disown
+# This will handle initial wallpaper setting and pywal theming at Hyprland login
 exec-once = \$HOME/.config/hypr/scripts/wallpaper.sh init
 exec-once = waybar
 exec-once = /usr/lib/polkit-gnome/polkit-gnome-authentication-agent-1
@@ -301,7 +304,7 @@ bindm = \$mainMod, mouse:273, resizewindow
 bind = , Print, exec, grim -g "\$(slurp)" - | wl-copy
 bind = \$mainMod, Print, exec, grim - | wl-copy
 
-# Media controls (fixed scroll direction)
+# Media controls
 bind = , XF86AudioRaiseVolume, exec, pactl set-sink-volume @DEFAULT_SINK@ +5%
 bind = , XF86AudioLowerVolume, exec, pactl set-sink-volume @DEFAULT_SINK@ -5%
 bind = , XF86AudioMute, exec, pactl set-sink-mute @DEFAULT_SINK@ toggle
@@ -332,7 +335,7 @@ echo "Creating $HYPRLAND_CONFIG_DIR/scripts/wallpaper.sh..."
 cat > "$HYPRLAND_CONFIG_DIR/scripts/wallpaper.sh" << EOL
 #!/bin/bash
 
-WALLPAPER_DIR="$WALLPAPER_DIR" # Use the passed variable for consistency
+WALLPAPER_DIR="$WALLPAPER_DIR"
 
 # List of wallpaper sources (multiple providers)
 SOURCES=(
@@ -353,7 +356,7 @@ check_internet() {
 # Function to try downloading from multiple sources
 download_wallpaper() {
     if ! check_internet; then
-        echo "No internet connection. Using local wallpapers." >&2
+        echo "No internet connection. Cannot download new wallpaper." >&2
         return 1
     fi
 
@@ -387,15 +390,23 @@ set_wallpaper() {
     if [[ -f "\$wallpaper" ]]; then
         echo "Setting wallpaper: \$wallpaper"
         # Set wallpaper with hyprpaper
+        # IMPORTANT: Replace eDP-1 with your actual monitor name (e.g., HDMI-A-1, DP-1)
+        # Use 'hyprctl monitors' in terminal to find your monitor name.
         hyprctl hyprpaper preload "\$wallpaper" 2>/dev/null || echo "Warning: Failed to preload wallpaper." >&2
         hyprctl hyprpaper wallpaper "eDP-1,\$wallpaper" 2>/dev/null || echo "Warning: Failed to set wallpaper." >&2
         hyprctl hyprpaper unload all 2>/dev/null # Unload old wallpapers after setting new one
         
         # Generate Material You colors using pywal
         echo "Generating pywal colors from \$wallpaper..."
-        wal -i "\$wallpaper" -n -q || echo "Warning: Pywal failed to generate colors." >&2
+        wal -i "\$wallpaper" -n -q --backend wal || echo "Warning: Pywal failed to generate colors." >&2
         
-        # Reload waybar to apply new colors
+        # Apply generated colors to applications
+        # Source Xresources for terminal (Kitty reads this on restart/refresh)
+        if [ -f "\$HOME/.cache/wal/colors.Xresources" ]; then
+            xrdb -merge "\$HOME/.cache/wal/colors.Xresources" || echo "Warning: Failed to merge Xresources." >&2
+        fi
+        
+        # Reload Waybar to apply new colors (from colors.css template)
         if pgrep -x "waybar" > /dev/null; then
             echo "Reloading Waybar..."
             killall -q waybar
@@ -404,13 +415,18 @@ set_wallpaper() {
             echo "Waybar not running, skipping reload." >&2
         fi
         
-        # Update kitty colors
+        # Update Kitty colors (kitty.conf references wal template)
         if pgrep -x "kitty" > /dev/null; then
             echo "Updating Kitty colors..."
             kitty @ set-colors --all --configured "\$HOME/.cache/wal/colors-kitty.conf" || echo "Warning: Failed to update Kitty colors." >&2
         else
             echo "Kitty not running, skipping color update." >&2
         fi
+
+        # Update Rofi (rofi.rasi uses wal template) - no explicit reload needed, rofi re-reads on launch
+        echo "Rofi will pick up new colors on next launch."
+
+        # Other applications (Nautilus, Gedit) will pick up GTK changes via xdg-desktop-portal-gtk
     else
         echo "Error: Wallpaper file not found: \$wallpaper" >&2
         return 1
@@ -423,7 +439,7 @@ main() {
 
     case "\$action" in
         init)
-            # On startup, try to load the most recent wallpaper
+            # On startup, try to load the most recent wallpaper first
             local recent_wallpaper=\$(ls -t "\$WALLPAPER_DIR"/*.jpg 2>/dev/null | head -n 1)
             if [[ -n "\$recent_wallpaper" ]]; then
                 echo "Initializing with recent wallpaper: \$recent_wallpaper"
@@ -452,7 +468,7 @@ main() {
             else
                 echo "Download failed. Using random local wallpaper if available."
                 local_wallpapers=(\"\$WALLPAPER_DIR\"/*.jpg)
-                if [[ \${#local_wallpapers[@]} -gt 0 && -f "\${local_wallpapers[0]}" ]]; then # Check if array is not empty AND first element is a file
+                if [[ \${#local_wallpapers[@]} -gt 0 && -f "\${local_wallpapers[0]}" ]]; then
                     random_wallpaper=\${local_wallpapers[\$RANDOM % \${#local_wallpapers[@]}]}
                     echo "Using random local wallpaper: \$random_wallpaper"
                     set_wallpaper "\$random_wallpaper"
@@ -476,151 +492,160 @@ chown "$REAL_USER":"$REAL_USER" "$HYPRLAND_CONFIG_DIR/scripts/wallpaper.sh"
 # Create Material You templates for Waybar
 echo "Creating $WAL_CONFIG_DIR/templates/waybar.css..."
 cat > "$WAL_CONFIG_DIR/templates/waybar.css" << EOL
+/*
+ * Waybar Material You Theme Template
+ * Generated by pywal
+ */
+
 * {
     border: none;
     border-radius: 0;
-    font-family: "JetBrains Mono", "Material Design Icons", "Font Awesome", sans-serif;
+    /* Prioritize JetBrains Mono for text, then icons */
+    font-family: "JetBrains Mono Nerd Font", "Material Design Icons", "Font Awesome 6 Free", sans-serif;
     font-size: 12px;
     min-height: 0;
+    /* Default text color, will be overridden by specific module colors */
+    color: {{foreground}}; 
 }
 
 window#waybar {
-    background: {{background}};
-    color: {{foreground}};
-    border-bottom: 1px solid {{color2}};
+    background: transparent; /* Make Waybar background transparent */
+    color: {{foreground}}; /* Default text color */
+    border-bottom: 0px solid transparent; /* No bottom border for clean look */
+}
+
+/* Modules without background to show only icon/text */
+#workspaces,
+#clock,
+#battery,
+#cpu,
+#memory,
+#temperature,
+#backlight,
+#network,
+#pulseaudio,
+#tray,
+#mode,
+#idle_inhibitor,
+#custom-launcher,
+#custom-powermenu,
+#disk {
+    background: transparent;
+    padding: 0 8px; /* Slightly more padding for better spacing */
+    margin: 0; /* No margin between modules, padding handles spacing */
+    color: {{foreground}}; /* Default text color for modules */
 }
 
 #workspaces button {
-    padding: 0 5px;
+    padding: 0 8px;
     background: transparent;
-    color: {{foreground}};
-    border-bottom: 3px solid transparent;
+    color: {{color8}}; /* Light gray for inactive workspaces */
+    border-bottom: 0px solid transparent;
+}
+
+#workspaces button.active {
+    background: transparent;
+    color: {{color4}}; /* Accent color for active workspace */
+    border-bottom: 0px solid {{color4}}; /* Subtle accent line */
+    font-weight: bold;
 }
 
 #workspaces button.focused {
-    background: {{color1}};
-    border-bottom: 3px solid {{foreground}};
+    background: transparent;
+    color: {{color4}}; /* Accent color for focused workspace */
+    border-bottom: 0px solid {{color4}}; /* Subtle accent line */
+    font-weight: bold;
 }
 
 #workspaces button.urgent {
-    background: {{color5}};
+    background: transparent;
+    color: {{color5}}; /* Red for urgent workspace */
+    border-bottom: 0px solid {{color5}};
 }
 
-#clock, #battery, #cpu, #memory, #temperature, #backlight, #network, #pulseaudio, #tray, #mode, #idle_inhibitor, #custom-launcher, #custom-powermenu {
-    padding: 0 6px;
-    margin: 0 2px;
-}
-
+/* Specific module text colors (if different from foreground) */
 #clock {
-    background-color: {{color1}};
-    color: {{background}};
+    color: {{color1}}; /* Example: Primary accent for clock */
 }
 
 #battery {
-    background-color: {{color2}};
-    color: {{background}};
+    color: {{color2}}; /* Example: Secondary accent for battery */
 }
-
 #battery.charging {
-    background-color: {{color4}};
-    color: {{background}};
+    color: {{color4}}; /* Green for charging */
 }
-
-@keyframes blink {
-    to {
-        background-color: {{color3}};
-        color: {{background}};
-    }
-}
-
-#battery.critical:not(.charging) {
-    background: {{color5}};
-    color: {{background}};
-    animation-name: blink;
-    animation-duration: 0.5s;
-    animation-timing-function: linear;
-    animation-iteration-count: infinite;
-    animation-direction: alternate;
+#battery.critical {
+    color: {{color5}}; /* Red for critical battery */
 }
 
 #cpu {
-    background: {{color3}};
-    color: {{background}};
+    color: {{color3}};
 }
 
 #memory {
-    background: {{color4}};
-    color: {{background}};
+    color: {{color4}};
 }
 
 #backlight {
-    background: {{color5}};
-    color: {{background}};
+    color: {{color5}};
 }
 
 #network {
-    background: {{color6}};
-    color: {{background}};
-}
-
-#network.disconnected {
-    background: {{color5}};
-    color: {{background}};
+    color: {{color6}};
 }
 
 #pulseaudio {
-    background: {{color7}};
-    color: {{background}};
+    color: {{color7}};
 }
-
 #pulseaudio.muted {
-    background: {{color8}};
-    color: {{background}};
+    color: {{color8}}; /* Muted color */
 }
 
 #temperature {
-    background: {{color9}};
-    color: {{background}};
+    color: {{color9}};
 }
-
 #temperature.critical {
-    background: {{color5}};
-    color: {{background}};
+    color: {{color5}};
 }
 
 #tray {
-    background-color: {{color1}};
-}
-
-#idle_inhibitor {
-    background-color: {{color2}};
+    color: {{color1}}; /* Consistent with launcher */
 }
 
 #custom-launcher {
-    background: {{color4}};
-    padding: 0 12px;
+    color: {{color4}}; /* Main accent color */
+    padding: 0 12px; /* More padding for launcher button */
     margin-left: 6px;
-    color: {{background}};
+    font-size: 16px; /* Slightly larger icon */
 }
 
 #custom-powermenu {
-    background: {{color5}};
+    color: {{color5}}; /* Red accent for power menu */
     padding: 0 12px;
     margin-right: 6px;
-    color: {{background}};
+    font-size: 16px; /* Slightly larger icon */
+}
+
+/* Tooltips */
+#tooltip {
+    background: {{background}};
+    border: 1px solid {{color4}};
+    border-radius: 5px;
+    padding: 5px 10px;
+    font-size: 12px;
+    color: {{foreground}};
 }
 EOL
 chown "$REAL_USER":"$REAL_USER" "$WAL_CONFIG_DIR/templates/waybar.css"
 
-
-# Create Waybar config with Material Design Icons
+# Create Waybar config with Material Design Icons and proper modules
 echo "Creating $WAYBAR_CONFIG_DIR/config..."
 cat > "$WAYBAR_CONFIG_DIR/config" << EOL
 {
     "layer": "top",
     "position": "top",
-    "height": 30,
-    "spacing": 4,
+    "height": 32, /* Slightly taller for better icon visibility */
+    "spacing": 0, /* Spacing handled by module padding in CSS */
     "modules-left": ["custom/launcher", "hyprland/workspaces"],
     "modules-center": ["hyprland/window"],
     "modules-right": [
@@ -629,6 +654,7 @@ cat > "$WAYBAR_CONFIG_DIR/config" << EOL
         "pulseaudio",
         "cpu",
         "memory",
+        "battery", /* Battery module */
         "temperature",
         "disk",
         "clock",
@@ -638,7 +664,7 @@ cat > "$WAYBAR_CONFIG_DIR/config" << EOL
         "format": "{icon}",
         "on-click": "activate",
         "format-icons": {
-            "1": "󰎤",
+            "1": "󰎤", /* Material Design Icons */
             "2": "󰎧",
             "3": "󰎪",
             "4": "󰎭",
@@ -666,33 +692,46 @@ cat > "$WAYBAR_CONFIG_DIR/config" << EOL
         "interval": 1
     },
     "cpu": {
-        "format": "󰍛 {usage}%",
+        "format": "󰍛 {usage}%", /* Material Design Icon for CPU */
         "interval": 1
     },
     "memory": {
-        "format": "󰍛 {percentage}%",
+        "format": "󰍛 {percentage}%", /* Material Design Icon for Memory */
         "interval": 1
+    },
+    "battery": {
+        "format": "{icon} {capacity}%",
+        "format-charging": "󰂄 {capacity}%", /* Charging icon */
+        "format-plugged": "󰢟 {capacity}%", /* Plugged in (not necessarily charging) */
+        "format-alt": "{time} {icon}", /* Show time remaining on alt-click */
+        "format-full": "󰁹 {capacity}%", /* Full battery icon */
+        "format-icons": ["󰂃", "󰂂", "󰂁", "󰂀", "󰁿", "󰁾", "󰁽", "󰁼", "󰁻", "󰁺"], /* Material Design Icons, low to high */
+        "states": {
+            "warning": 20, /* Less than or equal to 20% */
+            "critical": 10 /* Less than or equal to 10% */
+        },
+        "interval": 60
     },
     "temperature": {
         "thermal-zone": 0,
-        "hwmon-path": "/sys/class/hwmon/hwmon2/temp1_input",
-        "format": "󰔄 {temperatureC}°C",
+        "hwmon-path": "/sys/class/hwmon/hwmon2/temp1_input", /* Adjust if your system has a different path */
+        "format": "󰔄 {temperatureC}°C", /* Material Design Icon for Temperature */
         "critical-threshold": 80
     },
     "disk": {
-        "format": "󰋊 {percentage_used}%",
+        "format": "󰋊 {percentage_used}%", /* Material Design Icon for Disk */
         "path": "/",
         "interval": 30
     },
     "network": {
-        "format-wifi": "󰖩 {essid} ({signalStrength}%)",
-        "format-ethernet": "󰈁 {ipaddr}/{cidr}",
-        "format-disconnected": "󰖪 Disconnected",
+        "format-wifi": "󰖩 {essid} ({signalStrength}%)", /* Wifi icon */
+        "format-ethernet": "󰈁 {ipaddr}/{cidr}", /* Ethernet icon */
+        "format-disconnected": "󰖪 Disconnected", /* Disconnected icon */
         "interval": 1
     },
     "pulseaudio": {
         "format": "{icon} {volume}%",
-        "format-muted": "󰖁 Muted",
+        "format-muted": "󰖁 Muted", /* Muted icon */
         "format-icons": {
             "headphones": "󰋋",
             "handsfree": "󰋎",
@@ -700,7 +739,7 @@ cat > "$WAYBAR_CONFIG_DIR/config" << EOL
             "phone": "󰋎",
             "portable": "󰋎",
             "car": "󰄋",
-            "default": ["󰕿", "󰖀", "󰕾"]
+            "default": ["󰕿", "󰖀", "󰕾"] /* Material Design Icons */
         },
         "scroll-step": 5,
         "on-click": "pavucontrol",
@@ -709,17 +748,17 @@ cat > "$WAYBAR_CONFIG_DIR/config" << EOL
     "backlight": {
         "device": "intel_backlight",
         "format": "{icon} {percent}%",
-        "format-icons": ["󰃞", "󰃟", "󰃠"],
+        "format-icons": ["󰃞", "󰃟", "󰃠"], /* Material Design Icons */
         "on-scroll-up": "brightnessctl set +5%",
         "on-scroll-down": "brightnessctl set 5%-"
     },
     "custom/launcher": {
-        "format": "󰣇",
+        "format": "󰣇", /* Material Design Icon for Launcher */
         "on-click": "rofi -show drun",
         "tooltip": false
     },
     "custom/powermenu": {
-        "format": "󰐥",
+        "format": "󰐥", /* Material Design Icon for Power */
         "on-click": "rofi -show power-menu -modi power-menu:rofi-power-menu",
         "tooltip": false
     }
@@ -727,46 +766,73 @@ cat > "$WAYBAR_CONFIG_DIR/config" << EOL
 EOL
 chown "$REAL_USER":"$REAL_USER" "$WAYBAR_CONFIG_DIR/config"
 
-# Create Rofi config
-echo "Creating $ROFI_CONFIG_DIR/config.rasi..."
-cat > "$ROFI_CONFIG_DIR/config.rasi" << EOL
+# Create Waybar style.css (separate from config for theming)
+echo "Creating $WAYBAR_CONFIG_DIR/style.css..."
+cat > "$WAYBAR_CONFIG_DIR/style.css" << EOL
+/* This file is generated by pywal's template in ~/.config/wal/templates/waybar.css */
+/* Do not edit this file directly. Edit the template instead. */
+@import url("\$HOME/.cache/wal/colors.css");
+EOL
+chown "$REAL_USER":"$REAL_USER" "$WAYBAR_CONFIG_DIR/style.css"
+
+
+# Create Rofi config that will use pywal colors
+echo "Creating $WAL_CONFIG_DIR/templates/rofi.rasi..."
+cat > "$WAL_CONFIG_DIR/templates/rofi.rasi" << EOL
+/* Rofi Material You Theme Template */
+/* Generated by pywal */
+
 configuration {
-    modi: "drun,run,window";
+    modi: "drun,run,window,power-menu"; /* Added power-menu modi */
     show-icons: true;
-    icon-theme: "Material-Design-Icons";
-    display-drun: "󰣇";
+    icon-theme: "Material-Design-Icons"; /* Use Material Design Icons */
+    display-drun: "󰣇"; /* Launcher icon */
     drun-display-format: "{name}";
     sidebar-mode: false;
-    lines: 10;
-    font: "Material Design Icons, JetBrains Mono 12";
-    location: 0;
+    lines: 8; /* Fewer lines for a cleaner look */
+    font: "JetBrains Mono Nerd Font 12";
+    location: 0; /* Center */
     width: 30%;
     padding: 20;
+    
+    /* Colors from pywal */
     background: @background;
     background-color: @background;
     foreground: @foreground;
-    border-color: @color1;
+    border-color: @color4; /* Accent border */
+    
     selected-normal-foreground: @background;
-    selected-normal-background: @color4;
+    selected-normal-background: @color4; /* Highlight color */
+    
     selected-active-foreground: @background;
-    selected-active-background: @color5;
+    selected-active-background: @color5; /* Another accent */
+    
     selected-urgent-foreground: @background;
-    selected-urgent-background: @color3;
-    alternate-normal-background: @background;
+    selected-urgent-background: @color3; /* Warning/urgent color */
+    
     normal-background: @background;
     normal-foreground: @foreground;
+    
     active-background: @color1;
     active-foreground: @foreground;
+    
     urgent-background: @color5;
     urgent-foreground: @foreground;
+    
+    alternate-normal-background: @background;
     alternate-normal-foreground: @foreground;
+    
     alternate-active-background: @color1;
     alternate-active-foreground: @foreground;
+    
     alternate-urgent-background: @color5;
     alternate-urgent-foreground: @foreground;
-    spacing: 2;
+    
+    spacing: 5; /* Increased spacing */
+    yoffset: -100; /* Move slightly up from center */
 }
 
+/* Base theme */
 @theme "/dev/null"
 
 element-text, element-icon {
@@ -776,8 +842,10 @@ element-text, element-icon {
 
 window {
     background-color: @background;
-    border: 1;
-    padding: 5;
+    border: 2px; /* Border thickness */
+    border-color: @border-color;
+    border-radius: 10px; /* Rounded corners for Rofi */
+    padding: 20px; /* Internal padding */
 }
 
 mainbox {
@@ -786,115 +854,124 @@ mainbox {
 }
 
 message {
-    border: 1px dash 0px 0px;
-    border-color: @color1;
+    border: 0px; /* No border for message */
     padding: 1px;
 }
 
 textbox {
     text-color: @foreground;
+    border: 0px;
+    padding: 5px;
 }
 
 listview {
     fixed-height: 0;
-    border: 1px dash 0px 0px;
-    border-color: @color1;
-    spacing: 2px;
+    border: 0px; /* No border for listview */
+    spacing: 5px; /* Spacing between elements */
     scrollbar: false;
-    padding: 2px 0px 0px;
+    padding: 5px 0px 0px;
 }
 
 element {
     border: 0;
-    padding: 1px;
+    padding: 8px 10px; /* Padding for each entry */
+    border-radius: 5px; /* Rounded corners for elements */
 }
 
 element normal.normal {
-    background-color: @color0;
-    text-color: @foreground;
+    background-color: @normal-background;
+    text-color: @normal-foreground;
 }
 
 element normal.urgent {
-    background-color: @color5;
-    text-color: @foreground;
+    background-color: @urgent-background;
+    text-color: @urgent-foreground;
 }
 
 element normal.active {
-    background-color: @color1;
-    text-color: @foreground;
+    background-color: @active-background;
+    text-color: @active-foreground;
 }
 
 element selected.normal {
-    background-color: @color4;
-    text-color: @background;
+    background-color: @selected-normal-background;
+    text-color: @selected-normal-foreground;
 }
 
 element selected.urgent {
-    background-color: @color3;
-    text-color: @background;
+    background-color: @selected-urgent-background;
+    text-color: @selected-urgent-foreground;
 }
 
 element selected.active {
-    background-color: @color5;
-    text-color: @background;
+    background-color: @selected-active-background;
+    text-color: @selected-active-foreground;
 }
 
 element alternate.normal {
-    background-color: @color0;
-    text-color: @foreground;
+    background-color: @alternate-normal-background;
+    text-color: @alternate-normal-foreground;
 }
 
 element alternate.urgent {
-    background-color: @color5;
-    text-color: @foreground;
+    background-color: @alternate-urgent-background;
+    text-color: @alternate-urgent-foreground;
 }
 
 element alternate.active {
-    background-color: @color1;
-    text-color: @foreground;
+    background-color: @alternate-active-background;
+    text-color: @alternate-active-foreground;
 }
 
 scrollbar {
-    width: 4px;
-    border: 0;
-    handle-width: 8px;
-    padding: 0;
+    width: 0px; /* Hide scrollbar */
 }
 
 mode-switcher {
-    border: 1px dash 0px 0px;
-    border-color: @color1;
+    border: 0px; /* No border for mode switcher */
+    margin-top: 10px;
 }
 
 button {
-    padding: 5px;
+    padding: 8px 15px; /* Button padding */
     text-color: @foreground;
-    background-color: @color0;
+    background-color: @background;
+    border: 1px solid @color8; /* Subtle button border */
+    border-radius: 5px; /* Rounded buttons */
 }
 
 button selected {
     text-color: @background;
-    background-color: @color4;
+    background-color: @color4; /* Selected button color */
+    border-color: @color4;
 }
 
 inputbar {
-    spacing: 0;
+    spacing: 10px; /* Spacing for input elements */
     text-color: @foreground;
-    padding: 1px;
+    padding: 10px;
+    background-color: @color0; /* Darker background for input bar */
+    border-radius: 5px;
 }
 
 prompt {
     background-color: @color4;
-    padding: 6px;
+    padding: 8px 10px;
     text-color: @background;
+    border-radius: 5px;
 }
 EOL
-chown "$REAL_USER":"$REAL_USER" "$ROFI_CONFIG_DIR/config.rasi"
+chown "$REAL_USER":"$REAL_USER" "$WAL_CONFIG_DIR/templates/rofi.rasi"
 
-# Create Kitty config that will use pywal colors
+# Link Rofi config to the wal-generated one
+echo "Creating symlink for Rofi config..."
+sudo -u "$REAL_USER" ln -sf "$USER_HOME/.cache/wal/colors-rofi-dark.rasi" "$ROFI_CONFIG_DIR/config.rasi" || echo "Warning: Failed to create rofi config symlink." >&2
+
+
+# Create Kitty config that will use pywal colors and run fastfetch
 echo "Creating $KITTY_CONFIG_DIR/kitty.conf..."
 cat > "$KITTY_CONFIG_DIR/kitty.conf" << EOL
-font_family JetBrains Mono
+font_family JetBrains Mono Nerd Font
 font_size 11.0
 bold_font auto
 italic_font auto
@@ -903,8 +980,9 @@ background_opacity 0.9
 window_padding_width 5
 confirm_os_window_close 0
 enable_audio_bell no
+shell zsh -c "fastfetch; zsh" # Run fastfetch then zsh
 
-# This will be overridden by pywal
+# This will be overridden by pywal's generated colors
 include \$HOME/.cache/wal/colors-kitty.conf
 EOL
 chown "$REAL_USER":"$REAL_USER" "$KITTY_CONFIG_DIR/kitty.conf"
@@ -918,15 +996,49 @@ EOL
 chmod +x "$NAUTILUS_SCRIPTS_DIR/Open in Kitty"
 chown "$REAL_USER":"$REAL_USER" "$NAUTILUS_SCRIPTS_DIR/Open in Kitty"
 
+# Configure Zsh and Powerlevel10k
+echo "Configuring Zsh and Powerlevel10k for $REAL_USER..."
+# Change default shell to zsh
+if ! chsh -s "$(which zsh)" "$REAL_USER"; then
+    echo "Warning: Failed to change default shell for $REAL_USER to zsh. You may need to do this manually: chsh -s \$(which zsh) $REAL_USER" >&2
+fi
+
+# Set Powerlevel10k theme in .zshrc
+# Check if .zshrc exists, create if not
+if [ ! -f "$ZSH_CONFIG_DIR/.zshrc" ]; then
+    echo "# .zshrc - Auto-generated by Hyprland setup script" | sudo -u "$REAL_USER" tee "$ZSH_CONFIG_DIR/.zshrc" > /dev/null
+fi
+
+# Ensure Oh My Zsh is sourced before P10k
+if ! sudo -u "$REAL_USER" grep -q "source \$ZSH/oh-my-zsh.sh" "$ZSH_CONFIG_DIR/.zshrc"; then
+    echo 'export ZSH="$HOME/.oh-my-zsh"' | sudo -u "$REAL_USER" tee -a "$ZSH_CONFIG_DIR/.zshrc" > /dev/null
+    echo 'source "$ZSH/oh-my-zsh.sh"' | sudo -u "$REAL_USER" tee -a "$ZSH_CONFIG_DIR/.zshrc" > /dev/null
+fi
+
+# Set Powerlevel10k theme
+sudo -u "$REAL_USER" sed -i 's/^ZSH_THEME=".*"/ZSH_THEME="powerlevel10k\/powerlevel10k"/' "$ZSH_CONFIG_DIR/.zshrc" || \
+sudo -u "$REAL_USER" bash -c 'echo "ZSH_THEME=\"powerlevel10k/powerlevel10k\"" >> ~/.zshrc'
+
+# Add powerlevel10k sourcing if not present
+if ! sudo -u "$REAL_USER" grep -q "source /usr/share/zsh-theme-powerlevel10k/powerlevel10k.zsh-theme" "$ZSH_CONFIG_DIR/.zshrc"; then
+    echo 'source /usr/share/zsh-theme-powerlevel10k/powerlevel10k.zsh-theme' | sudo -u "$REAL_USER" tee -a "$ZSH_CONFIG_DIR/.zshrc" > /dev/null
+fi
+
+chown "$REAL_USER":"$REAL_USER" "$ZSH_CONFIG_DIR/.zshrc"
+
 
 # --- Final Steps ---
 
-# Initialize wallpaper for the user
-echo "Initializing wallpaper for $REAL_USER..."
-sudo -u "$REAL_USER" "$HYPRLAND_CONFIG_DIR/scripts/wallpaper.sh" init || echo "Warning: Wallpaper initialization failed. You may need to run it manually." >&2
-
 echo "--- Installation Complete ---"
 echo "Hyprland and its dependencies have been installed and configured."
-echo "Please reboot your system to start Hyprland and enjoy your new desktop environment."
-echo "After rebooting, SDDM should launch, allowing you to select Hyprland."
-echo "If you encounter issues, check the logs (journalctl -u sddm, journalctl -e)."
+echo ""
+echo "IMPORTANT NEXT STEPS:"
+echo "1. Reboot your system: sudo reboot"
+echo "2. After reboot, at the SDDM login screen, select 'Hyprland' session."
+echo "3. Once in Hyprland, open a terminal (Kitty)."
+echo "   - You might be prompted by Powerlevel10k to run 'p10k configure'. Follow the wizard to set up your Zsh prompt."
+echo "   - **CRITICAL:** Run 'hyprctl monitors' in your terminal and note your primary monitor's name (e.g., eDP-1, HDMI-A-1)."
+echo "   - **Then, manually edit ~/.config/hypr/wallpaper.sh** and change 'eDP-1' to your actual monitor name."
+echo "   - Re-run '~/.config/hypr/scripts/wallpaper.sh init' to apply the wallpaper correctly with your monitor name."
+echo "4. Explore your new Hyprland setup! Your Waybar, Rofi, and Kitty should be themed."
+echo "If you encounter issues, check the logs (journalctl -u sddm, journalctl -e, journalctl --user -u hyprland.service -f)."
