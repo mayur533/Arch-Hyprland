@@ -58,13 +58,14 @@ fi
 echo "Installing required packages..."
 # Packages generally available in official Arch repositories
 PACMAN_PACKAGES=(
-    hyprland sddm waybar kitty rofi gedit vlc nautilus dunst
+    hyprland sddm waybar kitty rofi dunst
     pulseaudio pulseaudio-alsa pavucontrol gnome-system-monitor blueman network-manager-applet libnotify
-    power-profiles-daemon jq wget curl imagemagick grim slurp wl-clipboard brightnessctl
+    jq wget curl imagemagick grim slurp wl-clipboard brightnessctl
     bluez bluez-utils polkit-gnome xdg-desktop-portal-hyprland xdg-desktop-portal-gtk qt5-wayland qt6-wayland
     python-pywal python-pip fastfetch # Added fastfetch
-    noto-fonts noto-fonts-cjk noto-fonts-emoji ttf-jetbrains-mono ttf-font-awesome # Font Awesome is for Waybar/Rofi icons
+    noto-fonts noto-fonts-cjk noto-fonts-emoji ttf-jetbrains-mono ttf-font-awesome # Font Awesome for icons
     zsh # Added zsh
+    nautilus gedit vlc # Re-added applications
 )
 
 if ! pacman -S --noconfirm "${PACMAN_PACKAGES[@]}"; then
@@ -76,9 +77,8 @@ echo "Core packages installed."
 echo "Installing additional AUR packages..."
 # Packages commonly found in the AUR (Arch User Repository)
 AUR_PACKAGES=(
-    swaylock-effects
-    google-chrome
-    visual-studio-code-bin
+    google-chrome # Re-added Chrome
+    visual-studio-code-bin # Re-added VS Code
     material-design-icons-git # Material Design Icons for Waybar/Rofi
     rofi-power-menu
     hyprpicker
@@ -96,7 +96,7 @@ echo "AUR packages installed."
 # --- Service Enablement ---
 
 echo "Enabling services..."
-SERVICES=(sddm bluetooth power-profiles-daemon)
+SERVICES=(sddm bluetooth)
 for service in "${SERVICES[@]}"; do
     if systemctl enable "$service"; then
         echo "Enabled $service."
@@ -120,6 +120,7 @@ WAYBAR_CONFIG_DIR="$USER_HOME/.config/waybar"
 ROFI_CONFIG_DIR="$USER_HOME/.config/rofi"
 KITTY_CONFIG_DIR="$USER_HOME/.config/kitty"
 WAL_CONFIG_DIR="$USER_HOME/.config/wal"
+DUNST_CONFIG_DIR="$USER_HOME/.config/dunst"
 NAUTILUS_SCRIPTS_DIR="$USER_HOME/.local/share/nautilus/scripts"
 WALLPAPER_DIR="$USER_HOME/Pictures/wallpapers"
 ZSH_CONFIG_DIR="$USER_HOME" # .zshrc is in home dir
@@ -131,6 +132,7 @@ declare -a config_dirs=(
     "$ROFI_CONFIG_DIR"
     "$KITTY_CONFIG_DIR"
     "$WAL_CONFIG_DIR/templates"
+    "$DUNST_CONFIG_DIR"
     "$NAUTILUS_SCRIPTS_DIR"
     "$WALLPAPER_DIR"
 )
@@ -157,10 +159,9 @@ exec-once = killall -q hyprpaper && hyprpaper & disown
 # This will handle initial wallpaper setting and pywal theming at Hyprland login
 exec-once = \$HOME/.config/hypr/scripts/wallpaper.sh init
 exec-once = waybar
-exec-once = /usr/lib/polkit-gnome/polkit-gnome-authentication-agent-1
+exec-once = /usr/lib/polkit-gnome/polkit-gnome-authentication-agent-1 # For policykit authentication
 exec-once = nm-applet --indicator
 exec-once = blueman-applet
-exec-once = swayidle -w timeout 300 'swaylock -f -c 000000' timeout 600 'hyprctl dispatch dpms off' resume 'hyprctl dispatch dpms on'
 exec-once = dunst # Notification daemon
 
 # Input configuration
@@ -325,10 +326,7 @@ bind = \$mainMod, Escape, exec, rofi -show power-menu -modi power-menu:rofi-powe
 # Wallpaper controls
 bind = \$mainMod SHIFT, W, exec, \$HOME/.config/hypr/scripts/wallpaper.sh change
 
-# Lock screen
-bind = \$mainMod, L, exec, swaylock -f -c 000000
-
-# Exit Hyprland
+# Exit Hyprland (no direct lock screen binding as sddm handles it)
 bind = \$mainMod SHIFT, Q, exit,
 EOL
 chown "$REAL_USER":"$REAL_USER" "$HYPRLAND_CONFIG_DIR/hyprland.conf"
@@ -650,7 +648,7 @@ cat > "$WAYBAR_CONFIG_DIR/config" << EOL
     "position": "top",
     "height": 32, /* Slightly taller for better icon visibility */
     "spacing": 0, /* Spacing handled by module padding in CSS */
-    "modules-left": ["custom/launcher", "hyprland/workspaces"],
+    "modules-left": ["hyprland/workspaces"],
     "modules-center": ["hyprland/window"],
     "modules-right": [
         "tray",
@@ -755,11 +753,6 @@ cat > "$WAYBAR_CONFIG_DIR/config" << EOL
         "format-icons": ["󰃞", "󰃟", "󰃠"], /* Material Design Icons */
         "on-scroll-up": "brightnessctl set +5%",
         "on-scroll-down": "brightnessctl set 5%-"
-    },
-    "custom/launcher": {
-        "format": "󰣇", /* Material Design Icon for Launcher */
-        "on-click": "rofi -show drun",
-        "tooltip": false
     },
     "custom/powermenu": {
         "format": "󰐥", /* Material Design Icon for Power */
@@ -968,7 +961,6 @@ EOL
 chown "$REAL_USER":"$REAL_USER" "$WAL_CONFIG_DIR/templates/rofi.rasi"
 
 # Link Rofi config to the wal-generated one
-# rofi-power-menu expects a default symlink, pywal generates colors-rofi-dark.rasi
 sudo -u "$REAL_USER" ln -sf "$USER_HOME/.cache/wal/colors-rofi-dark.rasi" "$ROFI_CONFIG_DIR/config.rasi" || echo "Warning: Failed to create rofi config symlink." >&2
 
 
@@ -980,7 +972,7 @@ font_size 11.0
 bold_font auto
 italic_font auto
 bold_italic_font auto
-background_opacity 0.9
+background_opacity 0.8 # Slightly less opaque than before for more blur visibility
 window_padding_width 5
 confirm_os_window_close 0
 enable_audio_bell no
@@ -990,6 +982,67 @@ shell zsh -c "fastfetch; zsh" # Run fastfetch then zsh
 include \$HOME/.cache/wal/colors-kitty.conf
 EOL
 chown "$REAL_USER":"$REAL_USER" "$KITTY_CONFIG_DIR/kitty.conf"
+
+# Configure Dunst
+echo "Creating $DUNST_CONFIG_DIR/dunstrc..."
+cat > "$DUNST_CONFIG_DIR/dunstrc" << EOL
+[global]
+    # Geometry
+    geometry = "300x5-30+20"
+    # show notification on top of fullscreen windows
+    fullscreen = show
+
+    # Font
+    font = JetBrains Mono Nerd Font 10
+    line_height = 0
+    markup = full
+    format = "<b>%s</b>\\n%b"
+
+    # Frame
+    frame_width = 1
+    frame_color = "#89B4FA" # Blue accent
+
+    # Icons
+    icon_position = left
+    icon_theme = Adwaita # Default Adwaita, user can change
+    
+    # Colors (these will be overridden by pywal, but good defaults)
+    background = "#1E1E2E"
+    foreground = "#CDD6F4"
+    highlight = "#89B4FA"
+
+    # Transparency
+    transparency = 10 # Dunst can have its own transparency
+
+    # Timing
+    notification_icon_size = 32
+    startup_notification = true
+    sticky_history = true
+    history_length = 20
+    shrink = no
+    indicate_hidden = yes
+    world_readable = yes
+    mouse_left_click = close_current
+    mouse_right_click = close_all
+    mouse_middle_click = do_action
+
+[urgency_low]
+    background = "#1E1E2E"
+    foreground = "#CDD6F4"
+    timeout = 10
+
+[urgency_normal]
+    background = "#1E1E2E"
+    foreground = "#CDD6F4"
+    timeout = 10
+
+[urgency_critical]
+    background = "#1E1E2E"
+    foreground = "#CDD6F4"
+    timeout = 20
+    frame_color = "#F38BA8" # Red for critical
+EOL
+chown "$REAL_USER":"$REAL_USER" "$DUNST_CONFIG_DIR/dunstrc"
 
 # Configure Nautilus to open Kitty
 echo "Creating $NAUTILUS_SCRIPTS_DIR/Open in Kitty..."
@@ -1035,7 +1088,7 @@ chown "$REAL_USER":"$REAL_USER" "$ZSH_CONFIG_DIR/.zshrc"
 # --- Final Steps ---
 
 echo "--- Installation Complete ---"
-echo "Hyprland and its dependencies have been installed and configured."
+echo "Hyprland and its components have been installed and configured."
 echo ""
 echo "IMPORTANT NEXT STEPS:"
 echo "1. Reboot your system: sudo reboot"
@@ -1044,6 +1097,6 @@ echo "3. Once in Hyprland, open a terminal (Kitty)."
 echo "   - You might be prompted by Powerlevel10k to run 'p10k configure'. Follow the wizard to set up your Zsh prompt."
 echo "   - **CRITICAL:** Run 'hyprctl monitors' in your terminal and note your primary monitor's name (e.g., eDP-1, HDMI-A-1)."
 echo "   - **Then, manually edit ~/.config/hypr/scripts/wallpaper.sh** and change 'eDP-1' to your actual monitor name."
-echo "   - Re-run '~/.config/hypr/scripts/wallpaper.sh init' to apply the wallpaper correctly with your monitor name."
-echo "4. Explore your new Hyprland setup! Your Waybar, Rofi, and Kitty should be themed."
-echo "If you encounter issues, check the logs (journalctl -u sddm, journalctl -e, journalctl --user -u hyprland.service -f)."
+echo "   - You can re-run '~/.config/hypr/scripts/wallpaper.sh init' to apply the wallpaper correctly with your monitor name and pywal colors."
+echo "4. Explore your new Hyprland setup! Your Waybar, Rofi, and Kitty should be themed dynamically."
+echo "5. If you encounter issues, check the logs (journalctl -u sddm, journalctl -e, journalctl --user -u hyprland.service -f)."
