@@ -77,8 +77,8 @@ echo "Core packages installed."
 echo "Installing additional AUR packages..."
 # Packages commonly found in the AUR (Arch User Repository)
 AUR_PACKAGES=(
-    google-chrome # Re-added Chrome
-    visual-studio-code-bin # Re-added VS Code
+    google-chrome
+    visual-studio-code-bin
     material-design-icons-git # Material Design Icons for Waybar/Rofi
     rofi-power-menu
     hyprpicker
@@ -333,7 +333,7 @@ chown "$REAL_USER":"$REAL_USER" "$HYPRLAND_CONFIG_DIR/hyprland.conf"
 
 # Create wallpaper script with multiple sources and Material You theming
 echo "Creating $HYPRLAND_CONFIG_DIR/scripts/wallpaper.sh..."
-cat > "$HYPRLAND_CONFIG_DIR/scripts/wallpaper.sh" << EOL
+cat > "$HYPRLAND_CONFIG_DIR/wallpaper.sh" << EOL
 #!/bin/bash
 
 WALLPAPER_DIR="$WALLPAPER_DIR"
@@ -476,6 +476,7 @@ main() {
                     set_wallpaper "\$random_wallpaper"
                 else
                     echo "No local wallpapers available to change to." >&2
+                G
                 fi
             fi
             ;;
@@ -488,8 +489,8 @@ main() {
 
 main "\$@"
 EOL
-chmod +x "$HYPRLAND_CONFIG_DIR/scripts/wallpaper.sh"
-chown "$REAL_USER":"$REAL_USER" "$HYPRLAND_CONFIG_DIR/scripts/wallpaper.sh"
+chmod +x "$HYPRLAND_CONFIG_DIR/wallpaper.sh" # Fix: changed path from scripts/wallpaper.sh to wallpaper.sh
+chown "$REAL_USER":"$REAL_USER" "$HYPRLAND_CONFIG_DIR/wallpaper.sh" # Fix: changed path
 
 # Create Material You templates for Waybar
 echo "Creating $WAL_CONFIG_DIR/templates/waybar.css..."
@@ -529,7 +530,6 @@ window#waybar {
 #tray,
 #mode,
 #idle_inhibitor,
-#custom-launcher,
 #custom-powermenu,
 #disk {
     background: transparent;
@@ -716,7 +716,7 @@ cat > "$WAYBAR_CONFIG_DIR/config" << EOL
     },
     "temperature": {
         "thermal-zone": 0,
-        "hwmon-path": "/sys/class/hwmon/hwmon2/temp1_input", /* Adjust if your system has a different path */
+        "hwmon-path": "/sys/class/hwmon/hwmon2/temp1_input", /* IMPORTANT: This path might be different on your system. Run 'ls /sys/class/hwmon/' to find your sensor. */
         "format": "󰔄 {temperatureC}°C", /* Material Design Icon for Temperature */
         "critical-threshold": 80
     },
@@ -782,7 +782,7 @@ cat > "$WAL_CONFIG_DIR/templates/rofi.rasi" << EOL
 configuration {
     modi: "drun,run,window,power-menu"; /* Added power-menu modi */
     show-icons: true;
-    icon-theme: "Material-Design-Icons"; /* Use Material Design Icons */
+    icon-theme: "Material-Design-Icons"; /* Use Material Design Icons, instead of Adwaita */
     display-drun: "󰣇"; /* Launcher icon */
     drun-display-format: "{name}";
     sidebar-mode: false;
@@ -1096,7 +1096,8 @@ echo "2. After reboot, at the SDDM login screen, select 'Hyprland' session."
 echo "3. Once in Hyprland, open a terminal (Kitty)."
 echo "   - You might be prompted by Powerlevel10k to run 'p10k configure'. Follow the wizard to set up your Zsh prompt."
 echo "   - **CRITICAL:** Run 'hyprctl monitors' in your terminal and note your primary monitor's name (e.g., eDP-1, HDMI-A-1)."
-echo "   - **Then, manually edit ~/.config/hypr/scripts/wallpaper.sh** and change 'eDP-1' to your actual monitor name."
-echo "   - You can re-run '~/.config/hypr/scripts/wallpaper.sh init' to apply the wallpaper correctly with your monitor name and pywal colors."
+echo "   - **Then, manually edit ~/.config/hypr/wallpaper.sh** and change 'eDP-1' to your actual monitor name. Pay attention to the path, it's directly in ~/.config/hypr/"
+echo "   - You can re-run '~/.config/hypr/wallpaper.sh init' to apply the wallpaper correctly with your monitor name and pywal colors."
+echo "   - **Waybar Temperature:** You might need to adjust 'hwmon-path' in ~/.config/waybar/config if the temperature module doesn't show data. Run 'ls -l /sys/class/hwmon/hwmon*/temp*_input' to find the correct path for your system."
 echo "4. Explore your new Hyprland setup! Your Waybar, Rofi, and Kitty should be themed dynamically."
 echo "5. If you encounter issues, check the logs (journalctl -u sddm, journalctl -e, journalctl --user -u hyprland.service -f)."
