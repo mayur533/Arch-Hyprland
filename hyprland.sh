@@ -37,11 +37,14 @@ if ! command -v yay &> /dev/null; then
     echo "Installing yay (AUR helper)..."
     pacman -S --needed --noconfirm git base-devel || { echo "Error: Failed to install git or base-devel." >&2; exit 1; }
 
-    TEMP_DIR=$(mktemp -d -t yay-install-XXXXXXXX)
+    # Use mktemp for secure temporary directory creation, run as REAL_USER
+    # This ensures the directory is owned by REAL_USER from the start and writable.
+    TEMP_DIR=$(sudo -u "$REAL_USER" mktemp -d -t yay-install-XXXXXXXX)
     echo "Cloning yay into $TEMP_DIR..."
     sudo -u "$REAL_USER" git clone https://aur.archlinux.org/yay.git "$TEMP_DIR/yay" || { echo "Error: Failed to clone yay repository." >&2; rm -rf "$TEMP_DIR"; exit 1; }
     
     echo "Building and installing yay..."
+    # 'makepkg -si --noconfirm' is crucial for unattended installation
     sudo -u "$REAL_USER" bash -c "cd \"$TEMP_DIR/yay\" && makepkg -si --noconfirm" || { echo "Error: Failed to build and install yay." >&2; rm -rf "$TEMP_DIR"; exit 1; }
     
     rm -rf "$TEMP_DIR"
@@ -343,9 +346,9 @@ SOURCES=(
     "https://source.unsplash.com/random/3840x2160/?landscape"
     "https://source.unsplash.com/random/3840x2160/?city"
     "https://source.unsplash.com/random/3840x2160/?space"
+    "https://picsum.photos/3840/2160" # Often more reliable
+    "https://random.imagecdn.app/3840/2160" # Another alternative
     "https://source.unsplash.com/random/3840x2160/?abstract"
-    "https://picsum.photos/3840/2160"
-    "https://random.imagecdn.app/3840/2160"
 )
 
 # Function to check internet connection
@@ -365,7 +368,8 @@ download_wallpaper() {
         local filepath="\$WALLPAPER_DIR/\$filename"
         
         echo "Trying source: \$source"
-        if wget -q --tries=3 --timeout=10 "\$source" -O "\$filepath"; then
+        # Increased timeout and retries for robustness
+        if wget -q --tries=5 --timeout=20 "\$source" -O "\$filepath"; then
             # Verify the downloaded file is actually an image using file command
             if file "\$filepath" | grep -q "image data"; then
                 echo "\$filepath"
@@ -423,7 +427,7 @@ set_wallpaper() {
             echo "Kitty not running, skipping color update." >&2
         fi
 
-        # Update Rofi (rofi.rasi uses wal template) - no explicit reload needed, rofi re-reads on launch
+        # Rofi will pick up new colors on next launch as it sources colors-rofi-dark.rasi linked from wal template
         echo "Rofi will pick up new colors on next launch."
 
         # Other applications (Nautilus, Gedit) will pick up GTK changes via xdg-desktop-portal-gtk
@@ -964,7 +968,7 @@ EOL
 chown "$REAL_USER":"$REAL_USER" "$WAL_CONFIG_DIR/templates/rofi.rasi"
 
 # Link Rofi config to the wal-generated one
-echo "Creating symlink for Rofi config..."
+# rofi-power-menu expects a default symlink, pywal generates colors-rofi-dark.rasi
 sudo -u "$REAL_USER" ln -sf "$USER_HOME/.cache/wal/colors-rofi-dark.rasi" "$ROFI_CONFIG_DIR/config.rasi" || echo "Warning: Failed to create rofi config symlink." >&2
 
 
@@ -1016,10 +1020,11 @@ if ! sudo -u "$REAL_USER" grep -q "source \$ZSH/oh-my-zsh.sh" "$ZSH_CONFIG_DIR/.
 fi
 
 # Set Powerlevel10k theme
-sudo -u "$REAL_USER" sed -i 's/^ZSH_THEME=".*"/ZSH_THEME="powerlevel10k\/powerlevel10k"/' "$ZSH_CONFIG_DIR/.zshrc" || \
+# Use sed -i to replace if ZSH_THEME exists, otherwise append
+sudo -u "$REAL_USER" sed -i '/^ZSH_THEME=/cZSH_THEME="powerlevel10k\/powerlevel10k"' "$ZSH_CONFIG_DIR/.zshrc" || \
 sudo -u "$REAL_USER" bash -c 'echo "ZSH_THEME=\"powerlevel10k/powerlevel10k\"" >> ~/.zshrc'
 
-# Add powerlevel10k sourcing if not present
+# Add powerlevel10k sourcing if not present and ensure it's at the end
 if ! sudo -u "$REAL_USER" grep -q "source /usr/share/zsh-theme-powerlevel10k/powerlevel10k.zsh-theme" "$ZSH_CONFIG_DIR/.zshrc"; then
     echo 'source /usr/share/zsh-theme-powerlevel10k/powerlevel10k.zsh-theme' | sudo -u "$REAL_USER" tee -a "$ZSH_CONFIG_DIR/.zshrc" > /dev/null
 fi
@@ -1038,7 +1043,7 @@ echo "2. After reboot, at the SDDM login screen, select 'Hyprland' session."
 echo "3. Once in Hyprland, open a terminal (Kitty)."
 echo "   - You might be prompted by Powerlevel10k to run 'p10k configure'. Follow the wizard to set up your Zsh prompt."
 echo "   - **CRITICAL:** Run 'hyprctl monitors' in your terminal and note your primary monitor's name (e.g., eDP-1, HDMI-A-1)."
-echo "   - **Then, manually edit ~/.config/hypr/wallpaper.sh** and change 'eDP-1' to your actual monitor name."
+echo "   - **Then, manually edit ~/.config/hypr/scripts/wallpaper.sh** and change 'eDP-1' to your actual monitor name."
 echo "   - Re-run '~/.config/hypr/scripts/wallpaper.sh init' to apply the wallpaper correctly with your monitor name."
 echo "4. Explore your new Hyprland setup! Your Waybar, Rofi, and Kitty should be themed."
 echo "If you encounter issues, check the logs (journalctl -u sddm, journalctl -e, journalctl --user -u hyprland.service -f)."
