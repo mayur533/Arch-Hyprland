@@ -59,7 +59,7 @@ fi
 echo "Installing required packages..."
 # Packages generally available in official Arch repositories
 PACMAN_PACKAGES=(
-    hyprland sddm waybar swaylock-effects kitty rofi gedit vlc nautilus dunst
+    hyprland sddm waybar kitty rofi gedit vlc nautilus dunst
     pulseaudio pulseaudio-alsa pavucontrol gnome-system-monitor blueman network-manager-applet libnotify
     power-profiles-daemon jq wget curl imagemagick grim slurp wl-clipboard brightnessctl
     bluez bluez-utils polkit-gnome xdg-desktop-portal-hyprland xdg-desktop-portal-gtk qt5-wayland qt6-wayland
@@ -76,6 +76,7 @@ echo "Core packages installed."
 echo "Installing additional AUR packages..."
 # Packages commonly found in the AUR (Arch User Repository)
 AUR_PACKAGES=(
+    swaylock-effects # Moved from pacman to AUR
     google-chrome # Web browser, typically AUR
     visual-studio-code-bin # VS Code binary, typically AUR
     material-design-icons-git # Icons, commonly AUR
@@ -354,7 +355,7 @@ download_wallpaper() {
     if ! check_internet; then
         echo "No internet connection. Using local wallpapers." >&2
         return 1
-    }
+    fi
 
     for source in "\${SOURCES[@]}"; do
         local filename="wallpaper_\$(date +%s).jpg"
