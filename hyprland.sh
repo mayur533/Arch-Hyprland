@@ -6,6 +6,12 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
+# Verify internet connection
+if ! ping -c 1 archlinux.org &> /dev/null; then
+    echo "No internet connection. Please connect to the internet before running this script."
+    exit 1
+fi
+
 # Update system first
 echo "Updating system..."
 pacman -Syu --noconfirm
@@ -19,7 +25,7 @@ fi
 
 # Install required packages
 echo "Installing required packages..."
-pacman -S --noconfirm \
+sudo pacman -S --noconfirm \
     hyprland \
     sddm \
     waybar \
@@ -28,7 +34,6 @@ pacman -S --noconfirm \
     rofi \
     google-chrome \
     hyprpaper \
-    code \
     gedit \
     vlc \
     nautilus \
@@ -62,9 +67,10 @@ pacman -S --noconfirm \
     qt6-wayland \
     python-pywal \
     python-pip \
-    material-icons
+    material-design-icons
 
 # Install additional AUR packages
+echo "Installing AUR packages..."
 sudo -u $SUDO_USER yay -S --noconfirm \
     material-design-icons \
     rofi-power-menu \
@@ -72,13 +78,8 @@ sudo -u $SUDO_USER yay -S --noconfirm \
 
 # Enable services
 echo "Enabling services..."
-systemctl enable sddm
 systemctl enable bluetooth
 systemctl enable power-profiles-daemon
-
-# Install SDDM Astronaut theme (it will handle its own configuration)
-echo "Installing SDDM Astronaut theme..."
-sudo -u $SUDO_USER bash -c 'sh -c "$(curl -fsSL https://raw.githubusercontent.com/keyitdev/sddm-astronaut-theme/master/setup.sh)"'
 
 # Create user directories
 echo "Creating user directories..."
@@ -94,7 +95,8 @@ KITTY_CONFIG_DIR="$USER_HOME/.config/kitty"
 WAL_CONFIG_DIR="$USER_HOME/.config/wal"
 NAUTILUS_SCRIPTS_DIR="$USER_HOME/.local/share/nautilus/scripts"
 
-mkdir -p "$HYPRLAND_CONFIG_DIR"
+# Create directories
+mkdir -p "$HYPRLAND_CONFIG_DIR/scripts"
 mkdir -p "$WAYBAR_CONFIG_DIR"
 mkdir -p "$ROFI_CONFIG_DIR"
 mkdir -p "$KITTY_CONFIG_DIR"
@@ -105,6 +107,7 @@ mkdir -p "$USER_HOME/Pictures/wallpapers"
 # Set ownership of config directories
 chown -R $SUDO_USER:$SUDO_USER "$USER_HOME/.config"
 chown -R $SUDO_USER:$SUDO_USER "$USER_HOME/.local"
+chown -R $SUDO_USER:$SUDO_USER "$USER_HOME/Pictures"
 
 # Create Hyprland config
 cat > "$HYPRLAND_CONFIG_DIR/hyprland.conf" << 'EOL'
@@ -309,7 +312,7 @@ SOURCES=(
 
 # Function to check internet connection
 check_internet() {
-    if ! ping -c 1 8.8.8.8 &> /dev/null; then
+    if ! ping -c 1 archlinux.org &> /dev/null; then
         return 1
     fi
     return 0
@@ -348,9 +351,9 @@ set_wallpaper() {
     
     if [[ -f "$wallpaper" ]]; then
         # Set wallpaper with hyprpaper
-        hyprctl hyprpaper preload "$wallpaper"
-        hyprctl hyprpaper wallpaper "eDP-1,$wallpaper"
-        hyprctl hyprpaper unload all
+        hyprctl hyprpaper preload "$wallpaper" 2>/dev/null
+        hyprctl hyprpaper wallpaper "eDP-1,$wallpaper" 2>/dev/null
+        hyprctl hyprpaper unload all 2>/dev/null
         
         # Generate Material You colors using pywal
         wal -i "$wallpaper" -n -q
@@ -661,7 +664,6 @@ cat > "$WAYBAR_CONFIG_DIR/config" << 'EOL'
 EOL
 
 # Create Rofi config
-mkdir -p "$ROFI_CONFIG_DIR"
 cat > "$ROFI_CONFIG_DIR/config.rasi" << 'EOL'
 configuration {
     modi: "drun,run,window";
@@ -790,67 +792,4 @@ element alternate.active {
 scrollbar {
     width: 4px;
     border: 0;
-    handle-width: 8px;
-    padding: 0;
-}
-
-mode-switcher {
-    border: 1px dash 0px 0px;
-    border-color: @color1;
-}
-
-button {
-    padding: 5px;
-    text-color: @foreground;
-    background-color: @color0;
-}
-
-button selected {
-    text-color: @background;
-    background-color: @color4;
-}
-
-inputbar {
-    spacing: 0;
-    text-color: @foreground;
-    padding: 1px;
-}
-
-prompt {
-    background-color: @color4;
-    padding: 6px;
-    text-color: @background;
-}
-EOL
-
-# Create Kitty config that will use pywal colors
-cat > "$KITTY_CONFIG_DIR/kitty.conf" << 'EOL'
-font_family JetBrains Mono
-font_size 11.0
-bold_font auto
-italic_font auto
-bold_italic_font auto
-background_opacity 0.9
-window_padding_width 5
-confirm_os_window_close 0
-enable_audio_bell no
-
-# This will be overridden by pywal
-include ~/.cache/wal/colors-kitty.conf
-EOL
-
-# Configure Nautilus to open Kitty
-cat > "$NAUTILUS_SCRIPTS_DIR/Open in Kitty" << 'EOL'
-#!/bin/bash
-kitty --working-directory="$NAUTILUS_SCRIPT_CURRENT_URI"
-EOL
-chmod +x "$NAUTILUS_SCRIPTS_DIR/Open in Kitty"
-
-# Set permissions
-chown -R $SUDO_USER:$SUDO_USER "$USER_HOME/.config"
-chown -R $SUDO_USER:$SUDO_USER "$USER_HOME/.local"
-
-# Initialize wallpaper
-sudo -u $SUDO_USER "$HYPRLAND_CONFIG_DIR/scripts/wallpaper.sh" init
-
-echo "Installation complete! Reboot your system to start Hyprland."
+    
