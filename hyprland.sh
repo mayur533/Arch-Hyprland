@@ -1,126 +1,159 @@
 #!/bin/bash
 
+# --- Script Initialization and Pre-checks ---
+
+# Set error handling: exit on first error, treat unset variables as errors, pipefail
+set -euo pipefail
+
 # Check if running as root
 if [ "$(id -u)" -ne 0 ]; then
-    echo "Please run this script as root."
+    echo "Error: This script must be run as root." >&2
     exit 1
 fi
+
+# Get the original user who invoked sudo for proper file ownership
+# This is more robust than relying on SUDO_USER directly, though SUDO_USER is generally fine.
+if [ -z "${SUDO_USER:-}" ]; then
+    echo "Error: SUDO_USER environment variable not set. Please run with sudo." >&2
+    exit 1
+fi
+REAL_USER="$SUDO_USER"
+USER_HOME=$(getent passwd "$REAL_USER" | cut -d: -f6)
 
 # Verify internet connection
-if ! ping -c 1 archlinux.org &> /dev/null; then
-    echo "No internet connection. Please connect to the internet before running this script."
+echo "Checking internet connection..."
+if ! curl -sSf --head archlinux.org &> /dev/null; then
+    echo "Error: No internet connection. Please connect to the internet before running this script." >&2
     exit 1
 fi
+echo "Internet connection verified."
 
-# Update system first
+# --- System Update and Yay Installation ---
+
 echo "Updating system..."
-pacman -Syu --noconfirm
+# Use --noconfirm for unattended updates, but be aware of potential issues with broken packages.
+# It's generally better for user-facing scripts to prompt or use a custom mirrorlist if silent update is critical.
+pacman -Syu --noconfirm || { echo "Error: Failed to update system." >&2; exit 1; }
 
 # Install yay if not installed
 if ! command -v yay &> /dev/null; then
-    echo "Installing yay..."
-    pacman -S --needed --noconfirm git base-devel
-    sudo -u $SUDO_USER bash -c 'cd /tmp && git clone https://aur.archlinux.org/yay.git && cd yay && makepkg -si --noconfirm'
+    echo "Installing yay (AUR helper)..."
+    pacman -S --needed --noconfirm git base-devel || { echo "Error: Failed to install git or base-devel." >&2; exit 1; }
+
+    # Use mktemp for secure temporary directory creation
+    TEMP_DIR=$(mktemp -d -t yay-install-XXXXXXXX)
+    echo "Cloning yay into $TEMP_DIR..."
+    sudo -u "$REAL_USER" git clone https://aur.archlinux.org/yay.git "$TEMP_DIR/yay" || { echo "Error: Failed to clone yay repository." >&2; rm -rf "$TEMP_DIR"; exit 1; }
+    
+    echo "Building and installing yay..."
+    sudo -u "$REAL_USER" bash -c "cd \"$TEMP_DIR/yay\" && makepkg -si --noconfirm" || { echo "Error: Failed to build and install yay." >&2; rm -rf "$TEMP_DIR"; exit 1; }
+    
+    rm -rf "$TEMP_DIR"
+    echo "Yay installed successfully."
+else
+    echo "Yay is already installed."
 fi
 
-# Install required packages
+# --- Package Installation ---
+
 echo "Installing required packages..."
-sudo pacman -S --noconfirm \
-    hyprland \
-    sddm \
-    waybar \
-    swaylock-effects \
-    kitty \
-    rofi \
-    google-chrome \
-    hyprpaper \
-    gedit \
-    vlc \
-    nautilus \
-    pulseaudio \
-    pulseaudio-alsa \
-    pavucontrol \
-    gnome-system-monitor \
-    blueman \
-    network-manager-applet \
-    libnotify \
-    power-profiles-daemon \
-    jq \
-    wget \
-    curl \
-    imagemagick \
-    grim \
-    slurp \
-    wl-clipboard \
-    brightnessctl \
-    bluez \
-    bluez-utils \
-    noto-fonts \
-    noto-fonts-cjk \
-    noto-fonts-emoji \
-    ttf-jetbrains-mono \
-    ttf-font-awesome \
-    polkit-gnome \
-    xdg-desktop-portal-hyprland \
-    xdg-desktop-portal-gtk \
-    qt5-wayland \
-    qt6-wayland \
-    python-pywal \
-    python-pip \
-    material-design-icons
+# Combine similar packages to reduce pacman calls.
+# Group fonts for better readability.
+# Removed 'material-design-icons' from pacman -S as it's an AUR package.
+PACMAN_PACKAGES=(
+    hyprland sddm waybar swaylock-effects kitty rofi google-chrome hyprpaper code gedit vlc nautilus
+    pulseaudio pulseaudio-alsa pavucontrol gnome-system-monitor blueman network-manager-applet libnotify
+    power-profiles-daemon jq wget curl imagemagick grim slurp wl-clipboard brightnessctl
+    bluez bluez-utils polkit-gnome xdg-desktop-portal-hyprland xdg-desktop-portal-gtk qt5-wayland qt6-wayland
+    python-pywal python-pip
+    noto-fonts noto-fonts-cjk noto-fonts-emoji ttf-jetbrains-mono ttf-font-awesome
+)
 
-# Install additional AUR packages
-echo "Installing AUR packages..."
-sudo -u $SUDO_USER yay -S --noconfirm \
-    material-design-icons \
-    rofi-power-menu \
+if ! pacman -S --noconfirm "${PACMAN_PACKAGES[@]}"; then
+    echo "Error: Failed to install one or more core packages with pacman." >&2
+    exit 1
+fi
+echo "Core packages installed."
+
+echo "Installing additional AUR packages..."
+AUR_PACKAGES=(
+    material-design-icons # This was listed in pacman, but is an AUR package
+    rofi-power-menu
     hyprpicker
+)
 
-# Enable services
+if ! sudo -u "$REAL_USER" yay -S --noconfirm "${AUR_PACKAGES[@]}"; then
+    echo "Error: Failed to install one or more AUR packages with yay." >&2
+    exit 1
+fi
+echo "AUR packages installed."
+
+# --- Service Enablement ---
+
 echo "Enabling services..."
-systemctl enable bluetooth
-systemctl enable power-profiles-daemon
+SERVICES=(sddm bluetooth power-profiles-daemon)
+for service in "${SERVICES[@]}"; do
+    if systemctl enable "$service"; then
+        echo "Enabled $service."
+    else
+        echo "Warning: Failed to enable $service." >&2
+    fi
+done
 
-# Create user directories
-echo "Creating user directories..."
-sudo -u $SUDO_USER xdg-user-dirs-update
+# --- User Directories Creation ---
 
-# Configure Hyprland
-echo "Configuring Hyprland..."
-USER_HOME=$(getent passwd $SUDO_USER | cut -d: -f6)
+echo "Creating user directories for $REAL_USER..."
+# This command should be run as the user, not root.
+sudo -u "$REAL_USER" xdg-user-dirs-update || { echo "Warning: Failed to update xdg user directories." >&2; }
+
+# --- Hyprland Configuration ---
+
+echo "Configuring Hyprland for $REAL_USER..."
+
+# Define configuration directories
 HYPRLAND_CONFIG_DIR="$USER_HOME/.config/hypr"
 WAYBAR_CONFIG_DIR="$USER_HOME/.config/waybar"
 ROFI_CONFIG_DIR="$USER_HOME/.config/rofi"
 KITTY_CONFIG_DIR="$USER_HOME/.config/kitty"
 WAL_CONFIG_DIR="$USER_HOME/.config/wal"
 NAUTILUS_SCRIPTS_DIR="$USER_HOME/.local/share/nautilus/scripts"
+WALLPAPER_DIR="$USER_HOME/Pictures/wallpapers"
 
-# Create directories
-mkdir -p "$HYPRLAND_CONFIG_DIR/scripts"
-mkdir -p "$WAYBAR_CONFIG_DIR"
-mkdir -p "$ROFI_CONFIG_DIR"
-mkdir -p "$KITTY_CONFIG_DIR"
-mkdir -p "$WAL_CONFIG_DIR/templates"
-mkdir -p "$NAUTILUS_SCRIPTS_DIR"
-mkdir -p "$USER_HOME/Pictures/wallpapers"
+# Create directories and set ownership immediately
+declare -a config_dirs=(
+    "$HYPRLAND_CONFIG_DIR/scripts"
+    "$WAYBAR_CONFIG_DIR"
+    "$ROFI_CONFIG_DIR"
+    "$KITTY_CONFIG_DIR"
+    "$WAL_CONFIG_DIR/templates"
+    "$NAUTILUS_SCRIPTS_DIR"
+    "$WALLPAPER_DIR"
+)
 
-# Set ownership of config directories
-chown -R $SUDO_USER:$SUDO_USER "$USER_HOME/.config"
-chown -R $SUDO_USER:$SUDO_USER "$USER_HOME/.local"
-chown -R $SUDO_USER:$SUDO_USER "$USER_HOME/Pictures"
+for dir in "${config_dirs[@]}"; do
+    if mkdir -p "$dir"; then
+        chown "$REAL_USER":"$REAL_USER" "$dir"
+        echo "Created and set ownership for $dir"
+    else
+        echo "Error: Failed to create directory $dir." >&2
+        exit 1
+    fi
+done
 
-# Create Hyprland config
-cat > "$HYPRLAND_CONFIG_DIR/hyprland.conf" << 'EOL'
+# Create Hyprland config file
+echo "Creating $HYPRLAND_CONFIG_DIR/hyprland.conf..."
+cat > "$HYPRLAND_CONFIG_DIR/hyprland.conf" << EOL
 # Monitor configuration
 monitor=,preferred,auto,1
 
 # Autostart
-exec-once = $HOME/.config/hypr/scripts/wallpaper.sh init
+exec-once = $USER_HOME/.config/hypr/scripts/wallpaper.sh init
 exec-once = waybar
 exec-once = /usr/lib/polkit-gnome/polkit-gnome-authentication-agent-1
 exec-once = nm-applet --indicator
 exec-once = blueman-applet
 exec-once = swayidle -w timeout 300 'swaylock -f -c 000000' timeout 600 'hyprctl dispatch dpms off' resume 'hyprctl dispatch dpms on'
+exec-once = dunst # Notification daemon
 
 # Input configuration
 input {
@@ -205,66 +238,66 @@ windowrule = float, ^(nm-connection-editor)$
 windowrule = center, ^(nm-connection-editor)$
 
 # Keybindings
-$mainMod = SUPER
+\$mainMod = SUPER
 
 # Applications
-bind = $mainMod, RETURN, exec, kitty
-bind = $mainMod, B, exec, google-chrome-stable
-bind = $mainMod, E, exec, nautilus
-bind = $mainMod, C, exec, code
-bind = $mainMod, G, exec, gedit
-bind = $mainMod, V, exec, vlc
-bind = $mainMod, R, exec, rofi -show drun
-bind = $mainMod, M, exec, gnome-system-monitor
+bind = \$mainMod, RETURN, exec, kitty
+bind = \$mainMod, B, exec, google-chrome-stable
+bind = \$mainMod, E, exec, nautilus
+bind = \$mainMod, C, exec, code
+bind = \$mainMod, G, exec, gedit
+bind = \$mainMod, V, exec, vlc
+bind = \$mainMod, R, exec, rofi -show drun
+bind = \$mainMod, M, exec, gnome-system-monitor
 
 # Window management
-bind = $mainMod, Q, killactive,
-bind = $mainMod, F, fullscreen,
-bind = $mainMod, Space, togglefloating,
-bind = $mainMod, P, pseudo, # dwindle
-bind = $mainMod, S, togglesplit, # dwindle
+bind = \$mainMod, Q, killactive,
+bind = \$mainMod, F, fullscreen,
+bind = \$mainMod, Space, togglefloating,
+bind = \$mainMod, P, pseudo, # dwindle
+bind = \$mainMod, S, togglesplit, # dwindle
 
 # Move focus
-bind = $mainMod, left, movefocus, l
-bind = $mainMod, right, movefocus, r
-bind = $mainMod, up, movefocus, u
-bind = $mainMod, down, movefocus, d
+bind = \$mainMod, left, movefocus, l
+bind = \$mainMod, right, movefocus, r
+bind = \$mainMod, up, movefocus, u
+bind = \$mainMod, down, movefocus, d
 
 # Switch workspaces
-bind = $mainMod, 1, workspace, 1
-bind = $mainMod, 2, workspace, 2
-bind = $mainMod, 3, workspace, 3
-bind = $mainMod, 4, workspace, 4
-bind = $mainMod, 5, workspace, 5
-bind = $mainMod, 6, workspace, 6
-bind = $mainMod, 7, workspace, 7
-bind = $mainMod, 8, workspace, 8
-bind = $mainMod, 9, workspace, 9
-bind = $mainMod, 0, workspace, 10
+bind = \$mainMod, 1, workspace, 1
+bind = \$mainMod, 2, workspace, 2
+bind = \$mainMod, 3, workspace, 3
+bind = \$mainMod, 4, workspace, 4
+bind = \$mainMod, 5, workspace, 5
+bind = \$mainMod, 6, workspace, 6
+bind = \$mainMod, 7, workspace, 7
+bind = \$mainMod, 8, workspace, 8
+bind = \$mainMod, 9, workspace, 9
+bind = \$mainMod, 0, workspace, 10
 
 # Move active window to workspace
-bind = $mainMod SHIFT, 1, movetoworkspace, 1
-bind = $mainMod SHIFT, 2, movetoworkspace, 2
-bind = $mainMod SHIFT, 3, movetoworkspace, 3
-bind = $mainMod SHIFT, 4, movetoworkspace, 4
-bind = $mainMod SHIFT, 5, movetoworkspace, 5
-bind = $mainMod SHIFT, 6, movetoworkspace, 6
-bind = $mainMod SHIFT, 7, movetoworkspace, 7
-bind = $mainMod SHIFT, 8, movetoworkspace, 8
-bind = $mainMod SHIFT, 9, movetoworkspace, 9
-bind = $mainMod SHIFT, 0, movetoworkspace, 10
+bind = \$mainMod SHIFT, 1, movetoworkspace, 1
+bind = \$mainMod SHIFT, 2, movetoworkspace, 2
+bind = \$mainMod SHIFT, 3, movetoworkspace, 3
+bind = \$mainMod SHIFT, 4, movetoworkspace, 4
+bind = \$mainMod SHIFT, 5, movetoworkspace, 5
+bind = \$mainMod SHIFT, 6, movetoworkspace, 6
+bind = \$mainMod SHIFT, 7, movetoworkspace, 7
+bind = \$mainMod SHIFT, 8, movetoworkspace, 8
+bind = \$mainMod SHIFT, 9, movetoworkspace, 9
+bind = \$mainMod SHIFT, 0, movetoworkspace, 10
 
 # Scroll through workspaces
-bind = $mainMod, mouse_down, workspace, e+1
-bind = $mainMod, mouse_up, workspace, e-1
+bind = \$mainMod, mouse_down, workspace, e+1
+bind = \$mainMod, mouse_up, workspace, e-1
 
 # Move/resize windows
-bindm = $mainMod, mouse:272, movewindow
-bindm = $mainMod, mouse:273, resizewindow
+bindm = \$mainMod, mouse:272, movewindow
+bindm = \$mainMod, mouse:273, resizewindow
 
 # Screenshots
-bind = , Print, exec, grim -g "$(slurp)" - | wl-copy
-bind = $mainMod, Print, exec, grim - | wl-copy
+bind = , Print, exec, grim -g "\$(slurp)" - | wl-copy
+bind = \$mainMod, Print, exec, grim - | wl-copy
 
 # Media controls (fixed scroll direction)
 bind = , XF86AudioRaiseVolume, exec, pactl set-sink-volume @DEFAULT_SINK@ +5%
@@ -279,24 +312,25 @@ bindle = , XF86MonBrightnessUp, exec, brightnessctl set +5%
 bindle = , XF86MonBrightnessDown, exec, brightnessctl set 5%-
 
 # Power menu
-bind = $mainMod, Escape, exec, rofi -show power-menu -modi power-menu:rofi-power-menu
+bind = \$mainMod, Escape, exec, rofi -show power-menu -modi power-menu:rofi-power-menu
 
 # Wallpaper controls
-bind = $mainMod SHIFT, W, exec, $HOME/.config/hypr/scripts/wallpaper.sh change
+bind = \$mainMod SHIFT, W, exec, \$HOME/.config/hypr/scripts/wallpaper.sh change
 
 # Lock screen
-bind = $mainMod, L, exec, swaylock -f -c 000000
+bind = \$mainMod, L, exec, swaylock -f -c 000000
 
 # Exit Hyprland
-bind = $mainMod SHIFT, Q, exit,
+bind = \$mainMod SHIFT, Q, exit,
 EOL
+chown "$REAL_USER":"$REAL_USER" "$HYPRLAND_CONFIG_DIR/hyprland.conf"
 
 # Create wallpaper script with multiple sources and Material You theming
-cat > "$HYPRLAND_CONFIG_DIR/scripts/wallpaper.sh" << 'EOL'
+echo "Creating $HYPRLAND_CONFIG_DIR/scripts/wallpaper.sh..."
+cat > "$HYPRLAND_CONFIG_DIR/scripts/wallpaper.sh" << EOL
 #!/bin/bash
 
-WALLPAPER_DIR="$HOME/Pictures/wallpapers"
-mkdir -p "$WALLPAPER_DIR"
+WALLPAPER_DIR="$WALLPAPER_DIR" # Use the passed variable for consistency
 
 # List of wallpaper sources (multiple providers)
 SOURCES=(
@@ -307,115 +341,141 @@ SOURCES=(
     "https://source.unsplash.com/random/3840x2160/?abstract"
     "https://picsum.photos/3840/2160"
     "https://random.imagecdn.app/3840/2160"
-    "https://wallhaven.cc/random"
+    # Note: wallhaven.cc/random might require parsing HTML or an API key,
+    # and directly downloading from it can be unreliable. Removed for simplicity.
 )
 
 # Function to check internet connection
 check_internet() {
-    if ! ping -c 1 archlinux.org &> /dev/null; then
-        return 1
-    fi
-    return 0
+    curl -sSf --head archlinux.org &> /dev/null
 }
 
 # Function to try downloading from multiple sources
 download_wallpaper() {
     if ! check_internet; then
-        echo "No internet connection. Using local wallpapers."
+        echo "No internet connection. Using local wallpapers." >&2
         return 1
     fi
 
-    # Try each source until one succeeds
-    for source in "${SOURCES[@]}"; do
-        local filename="wallpaper_$(date +%s).jpg"
-        local filepath="$WALLPAPER_DIR/$filename"
+    for source in "\${SOURCES[@]}"; do
+        local filename="wallpaper_\$(date +%s).jpg"
+        local filepath="\$WALLPAPER_DIR/\$filename"
         
-        echo "Trying source: $source"
-        if wget -q --tries=3 --timeout=10 "$source" -O "$filepath"; then
-            # Verify the downloaded file is actually an image
-            if file "$filepath" | grep -q "image data"; then
-                echo "$filepath"
+        echo "Trying source: \$source"
+        if wget -q --tries=3 --timeout=10 "\$source" -O "\$filepath"; then
+            # Verify the downloaded file is actually an image using file command
+            if file "\$filepath" | grep -q "image data"; then
+                echo "\$filepath"
                 return 0
             else
-                rm -f "$filepath"
+                echo "Downloaded file is not a valid image: \$filepath" >&2
+                rm -f "\$filepath"
             fi
+        else
+            echo "Failed to download from \$source" >&2
         fi
     done
     
+    echo "All online sources failed. Cannot download new wallpaper." >&2
     return 1
 }
 
 # Function to set wallpaper and apply Material You theming
 set_wallpaper() {
-    local wallpaper=$1
+    local wallpaper="\$1"
     
-    if [[ -f "$wallpaper" ]]; then
+    if [[ -f "\$wallpaper" ]]; then
+        echo "Setting wallpaper: \$wallpaper"
         # Set wallpaper with hyprpaper
-        hyprctl hyprpaper preload "$wallpaper" 2>/dev/null
-        hyprctl hyprpaper wallpaper "eDP-1,$wallpaper" 2>/dev/null
-        hyprctl hyprpaper unload all 2>/dev/null
+        hyprctl hyprpaper preload "\$wallpaper" 2>/dev/null || echo "Warning: Failed to preload wallpaper." >&2
+        hyprctl hyprpaper wallpaper "eDP-1,\$wallpaper" 2>/dev/null || echo "Warning: Failed to set wallpaper." >&2
+        hyprctl hyprpaper unload all 2>/dev/null # Unload old wallpapers after setting new one
         
         # Generate Material You colors using pywal
-        wal -i "$wallpaper" -n -q
+        echo "Generating pywal colors from \$wallpaper..."
+        wal -i "\$wallpaper" -n -q || echo "Warning: Pywal failed to generate colors." >&2
         
         # Reload waybar to apply new colors
         if pgrep -x "waybar" > /dev/null; then
+            echo "Reloading Waybar..."
             killall -q waybar
             waybar &> /dev/null & disown
+        else
+            echo "Waybar not running, skipping reload." >&2
         fi
         
         # Update kitty colors
         if pgrep -x "kitty" > /dev/null; then
-            kitty @ set-colors --all --configured ~/.cache/wal/colors-kitty.conf
+            echo "Updating Kitty colors..."
+            kitty @ set-colors --all --configured "\$HOME/.cache/wal/colors-kitty.conf" || echo "Warning: Failed to update Kitty colors." >&2
+        else
+            echo "Kitty not running, skipping color update." >&2
         fi
+    else
+        echo "Error: Wallpaper file not found: \$wallpaper" >&2
+        return 1
     fi
 }
 
 # Main function
 main() {
-    local action=${1:-"change"}
-    
-    if [[ "$action" == "init" ]]; then
-        # On startup, try to load the most recent wallpaper
-        local recent_wallpaper=$(ls -t "$WALLPAPER_DIR"/*.jpg 2>/dev/null | head -n 1)
-        if [[ -n "$recent_wallpaper" ]]; then
-            set_wallpaper "$recent_wallpaper"
-        else
-            # No local wallpapers, try to download
-            new_wallpaper=$(download_wallpaper)
-            if [[ -n "$new_wallpaper" ]]; then
-                set_wallpaper "$new_wallpaper"
+    local action="\${1:-"change"}" # Default action is 'change'
+
+    case "\$action" in
+        init)
+            # On startup, try to load the most recent wallpaper
+            local recent_wallpaper=\$(ls -t "\$WALLPAPER_DIR"/*.jpg 2>/dev/null | head -n 1)
+            if [[ -n "\$recent_wallpaper" ]]; then
+                echo "Initializing with recent wallpaper: \$recent_wallpaper"
+                set_wallpaper "\$recent_wallpaper"
+            else
+                echo "No local wallpapers found. Attempting to download for initialization."
+                new_wallpaper=\$(download_wallpaper)
+                if [[ -n "\$new_wallpaper" ]]; then
+                    set_wallpaper "\$new_wallpaper"
+                else
+                    echo "Could not initialize wallpaper. No local or downloadable wallpapers available." >&2
+                fi
             fi
-        fi
-    elif [[ "$action" == "change" ]]; then
-        # Try to download new wallpaper
-        new_wallpaper=$(download_wallpaper)
-        
-        if [[ -n "$new_wallpaper" ]]; then
-            # Set new wallpaper
-            set_wallpaper "$new_wallpaper"
+            ;;
+        change)
+            # Try to download new wallpaper
+            new_wallpaper=\$(download_wallpaper)
             
-            # Clean up old wallpapers (keep last 10)
-            ls -t "$WALLPAPER_DIR"/*.jpg 2>/dev/null | tail -n +11 | xargs rm -f
-        else
-            # Download failed, use random local wallpaper if available
-            local_wallpapers=("$WALLPAPER_DIR"/*.jpg)
-            if [[ ${#local_wallpapers[@]} -gt 0 ]]; then
-                random_wallpaper=${local_wallpapers[$RANDOM % ${#local_wallpapers[@]}]}
-                set_wallpaper "$random_wallpaper"
+            if [[ -n "\$new_wallpaper" ]]; then
+                echo "Changing to new wallpaper: \$new_wallpaper"
+                set_wallpaper "\$new_wallpaper"
+                
+                # Clean up old wallpapers (keep last 10)
+                echo "Cleaning up old wallpapers (keeping last 10)..."
+                ls -t "\$WALLPAPER_DIR"/*.jpg 2>/dev/null | tail -n +11 | xargs -r rm -f
+            else
+                echo "Download failed. Using random local wallpaper if available."
+                local_wallpapers=(\"\$WALLPAPER_DIR\"/*.jpg)
+                if [[ \${#local_wallpapers[@]} -gt 0 && -f "\${local_wallpapers[0]}" ]]; then # Check if array is not empty AND first element is a file
+                    random_wallpaper=\${local_wallpapers[\$RANDOM % \${#local_wallpapers[@]}]}
+                    echo "Using random local wallpaper: \$random_wallpaper"
+                    set_wallpaper "\$random_wallpaper"
+                else
+                    echo "No local wallpapers available to change to." >&2
+                fi
             fi
-        fi
-    fi
+            ;;
+        *)
+            echo "Usage: \$0 [init|change]" >&2
+            exit 1
+            ;;
+    esac
 }
 
-main "$@"
+main "\$@"
 EOL
-
-# Make wallpaper script executable
 chmod +x "$HYPRLAND_CONFIG_DIR/scripts/wallpaper.sh"
+chown "$REAL_USER":"$REAL_USER" "$HYPRLAND_CONFIG_DIR/scripts/wallpaper.sh"
 
 # Create Material You templates for Waybar
-cat > "$WAL_CONFIG_DIR/templates/waybar.css" << 'EOL'
+echo "Creating $WAL_CONFIG_DIR/templates/waybar.css..."
+cat > "$WAL_CONFIG_DIR/templates/waybar.css" << EOL
 * {
     border: none;
     border-radius: 0;
@@ -550,9 +610,12 @@ window#waybar {
     color: {{background}};
 }
 EOL
+chown "$REAL_USER":"$REAL_USER" "$WAL_CONFIG_DIR/templates/waybar.css"
+
 
 # Create Waybar config with Material Design Icons
-cat > "$WAYBAR_CONFIG_DIR/config" << 'EOL'
+echo "Creating $WAYBAR_CONFIG_DIR/config..."
+cat > "$WAYBAR_CONFIG_DIR/config" << EOL
 {
     "layer": "top",
     "position": "top",
@@ -599,7 +662,7 @@ cat > "$WAYBAR_CONFIG_DIR/config" << 'EOL'
     },
     "clock": {
         "format": "󰥔 {:%H:%M}",
-        "tooltip-format": "<big>{:%Y %B}</big>\n<tt><small>{calendar}</small></tt>",
+        "tooltip-format": "<big>{:%Y %B}</big>\\n<tt><small>{calendar}</small></tt>",
         "interval": 1
     },
     "cpu": {
@@ -662,9 +725,11 @@ cat > "$WAYBAR_CONFIG_DIR/config" << 'EOL'
     }
 }
 EOL
+chown "$REAL_USER":"$REAL_USER" "$WAYBAR_CONFIG_DIR/config"
 
 # Create Rofi config
-cat > "$ROFI_CONFIG_DIR/config.rasi" << 'EOL'
+echo "Creating $ROFI_CONFIG_DIR/config.rasi..."
+cat > "$ROFI_CONFIG_DIR/config.rasi" << EOL
 configuration {
     modi: "drun,run,window";
     show-icons: true;
@@ -792,4 +857,76 @@ element alternate.active {
 scrollbar {
     width: 4px;
     border: 0;
-    
+    handle-width: 8px;
+    padding: 0;
+}
+
+mode-switcher {
+    border: 1px dash 0px 0px;
+    border-color: @color1;
+}
+
+button {
+    padding: 5px;
+    text-color: @foreground;
+    background-color: @color0;
+}
+
+button selected {
+    text-color: @background;
+    background-color: @color4;
+}
+
+inputbar {
+    spacing: 0;
+    text-color: @foreground;
+    padding: 1px;
+}
+
+prompt {
+    background-color: @color4;
+    padding: 6px;
+    text-color: @background;
+}
+EOL
+chown "$REAL_USER":"$REAL_USER" "$ROFI_CONFIG_DIR/config.rasi"
+
+# Create Kitty config that will use pywal colors
+echo "Creating $KITTY_CONFIG_DIR/kitty.conf..."
+cat > "$KITTY_CONFIG_DIR/kitty.conf" << EOL
+font_family JetBrains Mono
+font_size 11.0
+bold_font auto
+italic_font auto
+bold_italic_font auto
+background_opacity 0.9
+window_padding_width 5
+confirm_os_window_close 0
+enable_audio_bell no
+
+# This will be overridden by pywal
+include \$HOME/.cache/wal/colors-kitty.conf
+EOL
+chown "$REAL_USER":"$REAL_USER" "$KITTY_CONFIG_DIR/kitty.conf"
+
+# Configure Nautilus to open Kitty
+echo "Creating $NAUTILUS_SCRIPTS_DIR/Open in Kitty..."
+cat > "$NAUTILUS_SCRIPTS_DIR/Open in Kitty" << EOL
+#!/bin/bash
+kitty --working-directory="\$NAUTILUS_SCRIPT_CURRENT_URI"
+EOL
+chmod +x "$NAUTILUS_SCRIPTS_DIR/Open in Kitty"
+chown "$REAL_USER":"$REAL_USER" "$NAUTILUS_SCRIPTS_DIR/Open in Kitty"
+
+
+# --- Final Steps ---
+
+# Initialize wallpaper for the user
+echo "Initializing wallpaper for $REAL_USER..."
+sudo -u "$REAL_USER" "$HYPRLAND_CONFIG_DIR/scripts/wallpaper.sh" init || echo "Warning: Wallpaper initialization failed. You may need to run it manually." >&2
+
+echo "--- Installation Complete ---"
+echo "Hyprland and its dependencies have been installed and configured."
+echo "Please reboot your system to start Hyprland and enjoy your new desktop environment."
+echo "After rebooting, SDDM should launch, allowing you to select Hyprland."
+echo "If you encounter issues, check the logs (journalctl -u sddm, journalctl -e)."
