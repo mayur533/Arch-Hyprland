@@ -68,28 +68,30 @@ if ! command -v yay &>/dev/null; then
     rm -rf /tmp/yay
 fi
 
-# Package lists
+# Package lists (excluding unavailable packages)
 OFFICIAL_PACKAGES=(
     zsh
     hyprland hyprlock hyprpaper kitty waybar
     networkmanager network-manager-applet
-    bluetooth bluez bluez-utils blueman
+    bluez bluez-utils blueman
     rofi sddm gnome-keyring
     xdg-desktop-portal-hyprland xdg-desktop-portal-gtk
     qt5-wayland qt6-wayland wl-clipboard
     grim slurp polkit-gnome brightnessctl
-    playerctl libplayerctl
+    playerctl
     papirus-icon-theme
     ttf-dejavu ttf-liberation ttf-font-awesome
     ttf-jetbrains-mono noto-fonts
     noto-fonts-emoji noto-fonts-cjk
     pavucontrol gnome-system-monitor
     vlc gedit fastfetch cava btop
+    power-profiles-daemon
+    intel-media-driver libva-intel-driver
+    gst-libav gst-plugins-good gst-plugins-bad gst-plugins-ugly
 )
 
 AUR_PACKAGES=(
     google-chrome visual-studio-code-bin
-    nwg-look-bin rofi-lbon-wayland-git
     zsh-theme-powerlevel10k-git
 )
 
@@ -122,6 +124,7 @@ log "Enabling services..."
 sudo systemctl enable --now NetworkManager 2>&1 | tee -a $LOG_FILE
 sudo systemctl enable --now bluetooth 2>&1 | tee -a $LOG_FILE
 sudo systemctl enable --now sddm 2>&1 | tee -a $LOG_FILE
+sudo systemctl enable --now power-profiles-daemon 2>&1 | tee -a $LOG_FILE
 
 # Configure Oh My Zsh with p10k
 if command -v zsh &>/dev/null; then
@@ -152,7 +155,9 @@ log "Recommended next steps:"
 log "1. Restart your computer"
 log "2. Powerlevel10k will configure itself when you first open terminal"
 log "3. Set up Bluetooth with: blueman-manager"
-log "4. Configure rofi-lbon-wayland for app launcher"
-log "5. Configure gnome-keyring manually if needed"
+log "4. Configure gnome-keyring manually if needed"
+log "5. For video acceleration, ensure these environment variables are set:"
+log "   export LIBVA_DRIVER_NAME=iHD"
+log "   export VDPAU_DRIVER=va_gl"
 
 log "Full installation log available at: $LOG_FILE"
