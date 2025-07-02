@@ -1,298 +1,158 @@
 #!/bin/bash
 
+# Configuration
+LOG_FILE="hyprland_install_$(date +%Y%m%d_%H%M%S).log"
+MISSING_PACKAGES_LOG="missing_packages.log"
+
+# Initialize logs
+echo "Hyprland Installation Log - $(date)" > $LOG_FILE
+echo "Missing packages will be logged here" > $MISSING_PACKAGES_LOG
+
+# Function to log messages
+log() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" | tee -a $LOG_FILE
+}
+
+# Function to check package availability
+check_package() {
+    local pkg=$1
+    local repo=$2
+    
+    if [ "$repo" == "aur" ]; then
+        if ! yay -Si "$pkg" &>> $LOG_FILE; then
+            log "Package not found in AUR: $pkg"
+            echo "$pkg (AUR)" >> $MISSING_PACKAGES_LOG
+            return 1
+        fi
+    else
+        if ! pacman -Si "$pkg" &>> $LOG_FILE; then
+            log "Package not found in official repos: $pkg"
+            echo "$pkg (Official)" >> $MISSING_PACKAGES_LOG
+            return 1
+        fi
+    fi
+    return 0
+}
+
 # Check if running as root
 if [ "$(id -u)" -eq 0 ]; then
-    echo "❌ This script should not be run as root. It will ask for sudo when needed."
+    log "This script should not be run as root. It will ask for sudo when needed."
     exit 1
 fi
 
-# Function to install packages with error handling
-install_packages() {
-    sudo pacman -S --needed --noconfirm "$@" || {
-        echo "❌ Failed to install packages: $*"
-        exit 1
-    }
-}
-
-# Function to install AUR packages with error handling
-install_aur_packages() {
-    yay -S --needed --noconfirm "$@" || {
-        echo "❌ Failed to install AUR packages: $*"
-        exit 1
-    }
-}
-
-echo "🔄 Updating system..."
-sudo pacman -Syu --noconfirm
+# Update system first
+log "Updating system..."
+sudo pacman -Syu --noconfirm 2>&1 | tee -a $LOG_FILE
+if [ ${PIPESTATUS[0]} -ne 0 ]; then
+    log "Failed to update system"
+    exit 1
+fi
 
 # Install yay if not installed
 if ! command -v yay &>/dev/null; then
-    echo "⬇️ Installing yay..."
-    install_packages base-devel git
-    git clone https://aur.archlinux.org/yay.git /tmp/yay
-    (cd /tmp/yay && makepkg -si --noconfirm)
+    log "Installing yay..."
+    sudo pacman -S --needed --noconfirm base-devel git 2>&1 | tee -a $LOG_FILE || {
+        log "Failed to install yay dependencies"
+        exit 1
+    }
+    git clone https://aur.archlinux.org/yay.git /tmp/yay 2>&1 | tee -a $LOG_FILE || {
+        log "Failed to clone yay"
+        exit 1
+    }
+    cd /tmp/yay || exit 1
+    makepkg -si --noconfirm 2>&1 | tee -a $LOG_FILE || {
+        log "Failed to build yay"
+        exit 1
+    }
+    cd ~ || exit 1
     rm -rf /tmp/yay
 fi
 
-# Remove conflicting portals and install correct ones
-echo "🔧 Setting up portals..."
-sudo pacman -Rns --noconfirm xdg-desktop-portal-gtk || true
-install_packages xdg-desktop-portal-hyprland xdg-desktop-portal
+# Package lists
+OFFICIAL_PACKAGES=(
+    zsh
+    hyprland hyprlock hyprpaper kitty waybar
+    networkmanager network-manager-applet
+    bluetooth bluez bluez-utils blueman
+    rofi sddm gnome-keyring
+    xdg-desktop-portal-hyprland xdg-desktop-portal-gtk
+    qt5-wayland qt6-wayland wl-clipboard
+    grim slurp polkit-gnome brightnessctl
+    playerctl libplayerctl
+    papirus-icon-theme
+    ttf-dejavu ttf-liberation ttf-font-awesome
+    ttf-jetbrains-mono noto-fonts
+    noto-fonts-emoji noto-fonts-cjk
+    pavucontrol gnome-system-monitor
+    vlc gedit fastfetch cava btop
+)
 
-# Install required packages from official repo
-echo "📦 Installing official packages..."
-install_packages hyprland hyprpaper rofi kitty networkmanager bluez bluez-utils \
-    pavucontrol gnome-system-monitor vlc gedit gnome-keyring sddm nautilus \
-    noto-fonts noto-fonts-emoji ttf-jetbrains-mono ttf-font-awesome gtk-layer-shell \
-    wl-clipboard grim slurp polkit-gnome brightnessctl playerctl socat \
-    network-manager-applet blueman
+AUR_PACKAGES=(
+    google-chrome visual-studio-code-bin
+    nwg-look-bin rofi-lbon-wayland-git
+    zsh-theme-powerlevel10k-git
+)
+
+# Verify package availability
+log "Checking package availability..."
+for pkg in "${OFFICIAL_PACKAGES[@]}"; do
+    check_package "$pkg" "official"
+done
+
+for pkg in "${AUR_PACKAGES[@]}"; do
+    check_package "$pkg" "aur"
+done
+
+# Install official packages
+log "Installing official packages..."
+sudo pacman -S --needed --noconfirm "${OFFICIAL_PACKAGES[@]}" 2>&1 | tee -a $LOG_FILE
+if [ ${PIPESTATUS[0]} -ne 0 ]; then
+    log "Some official packages failed to install - check $LOG_FILE"
+fi
 
 # Install AUR packages
-echo "📦 Installing AUR packages..."
-install_aur_packages google-chrome visual-studio-code-bin waybar-hyprland-git nerd-fonts-jetbrains-mono ttf-font-awesome-6
-
-# Enable required services
-echo "✅ Enabling services..."
-sudo systemctl enable --now NetworkManager bluetooth sddm
-
-# Configure Hyprland
-echo "🛠️ Configuring Hyprland..."
-mkdir -p ~/.config/hypr
-cat > ~/.config/hypr/hyprland.conf << 'EOF'
-[...Hyprland config remains unchanged for brevity...]
-EOF
-
-# Download wallpaper
-mkdir -p ~/.config/hypr/hyprpaper
-cat > ~/.config/hypr/hyprpaper.conf << 'EOF'
-preload = ~/.config/hypr/wallpaper.jpg
-wallpaper = ,~/.config/hypr/wallpaper.jpg
-EOF
-
-curl -Lo ~/.config/hypr/wallpaper.jpg https://wallpapercave.com/wp/wp9566386.jpg
-
-# Configure Waybar
-mkdir -p ~/.config/waybar
-cat > ~/.config/waybar/config << 'EOF'
-{
-    "layer": "top",
-    "position": "top",
-    "height": 30,
-    "spacing": 4,
-    "modules-left": ["hyprland/workspaces", "custom/media"],
-    "modules-center": ["hyprland/window"],
-    "modules-right": ["tray", "network", "bluetooth", "pulseaudio", "backlight", "battery", "clock"],
-
-    "hyprland/workspaces": {
-        "format": "{icon}",
-        "format-icons": {
-            "1": "",
-            "2": "",
-            "3": "",
-            "4": "",
-            "5": "",
-            "6": "",
-            "7": "",
-            "8": "",
-            "9": "",
-            "10": ""
-        }
-    },
-
-    "custom/media": {
-        "format": "{}",
-        "max-length": 30,
-        "exec": "$HOME/.config/waybar/mediaplayer.sh 2> /dev/null",
-        "on-click": "playerctl play-pause",
-        "on-click-right": "playerctl next",
-        "on-scroll-up": "playerctl previous",
-        "on-scroll-down": "playerctl next",
-        "escape": true
-    },
-
-    "hyprland/window": {
-        "max-length": 50,
-        "format": "{} "
-    },
-
-    "tray": {
-        "spacing": 10,
-        "icon-size": 16
-    },
-
-    "network": {
-        "format-wifi": " {signalStrength}%",
-        "format-ethernet": "",
-        "format-disconnected": "󰌙",
-        "tooltip-format": "{ifname}: {ipaddr}/{cidr}",
-        "on-click": "nm-connection-editor"
-    },
-
-    "bluetooth": {
-        "format": " {status}",
-        "format-connected": "",
-        "format-disabled": "󰂲",
-        "on-click": "blueman-manager"
-    },
-
-    "pulseaudio": {
-        "format": "{icon} {volume}%",
-        "format-muted": "",
-        "format-icons": {
-            "headphones": "",
-            "default": ["", ""]
-        },
-        "on-click": "pavucontrol"
-    },
-
-    "backlight": {
-        "format": "{icon} {percent}%",
-        "format-icons": ["", "", "", ""],
-        "on-scroll-up": "brightnessctl set +5%",
-        "on-scroll-down": "brightnessctl set 5%-"
-    },
-
-    "battery": {
-        "states": {
-            "good": 90,
-            "warning": 50,
-            "critical": 20
-        },
-        "format": "{icon} {capacity}%",
-        "format-charging": " {capacity}%",
-        "format-plugged": " {capacity}%",
-        "format-icons": ["󰁺", "󰁼", "󰁽", "󰁿", "󰂁"]
-    },
-
-    "clock": {
-        "format": " {:%I:%M %p}  {:%d/%m}",
-        "tooltip-format": "{:%A, %B %d, %Y (%I:%M %p)}"
-    }
-}
-EOF
-
-# Waybar media script
-cat > ~/.config/waybar/mediaplayer.sh << 'EOF'
-#!/bin/sh
-player_status=$(playerctl status 2>/dev/null)
-if [ "$player_status" = "Playing" ]; then
-    echo " $(playerctl metadata artist) - $(playerctl metadata title)"
-elif [ "$player_status" = "Paused" ]; then
-    echo " $(playerctl metadata artist) - $(playerctl metadata title)"
-else
-    echo ""
+log "Installing AUR packages..."
+yay -S --needed --noconfirm "${AUR_PACKAGES[@]}" 2>&1 | tee -a $LOG_FILE
+if [ ${PIPESTATUS[0]} -ne 0 ]; then
+    log "Some AUR packages failed to install - check $LOG_FILE"
 fi
-EOF
-chmod +x ~/.config/waybar/mediaplayer.sh
 
-# Waybar style
-cat > ~/.config/waybar/style.css << 'EOF'
-* {
-    border: none;
-    border-radius: 0;
-    font-family: "JetBrainsMono Nerd Font", "Font Awesome 6 Free", sans-serif;
-    font-size: 12px;
-    min-height: 0;
-}
+# Enable services
+log "Enabling services..."
+sudo systemctl enable --now NetworkManager 2>&1 | tee -a $LOG_FILE
+sudo systemctl enable --now bluetooth 2>&1 | tee -a $LOG_FILE
+sudo systemctl enable --now sddm 2>&1 | tee -a $LOG_FILE
 
-window#waybar {
-    background: rgba(43, 48, 59, 0.9);
-    color: white;
-    border-bottom: 1px solid rgba(100, 114, 125, 0.5);
-}
+# Configure Oh My Zsh with p10k
+if command -v zsh &>/dev/null; then
+    log "Configuring Oh My Zsh..."
+    if [ ! -d "$HOME/.oh-my-zsh" ]; then
+        sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended 2>&1 | tee -a $LOG_FILE
+        echo 'source /usr/share/zsh-theme-powerlevel10k/powerlevel10k.zsh-theme' >> ~/.zshrc
+        log "Powerlevel10k will configure itself on first zsh launch"
+    fi
 
-#workspaces button {
-    padding: 0 5px;
-    background: transparent;
-    color: white;
-    border-bottom: 3px solid transparent;
-}
+    if [ "$SHELL" != "$(which zsh)" ]; then
+        log "Setting zsh as default shell..."
+        chsh -s $(which zsh) 2>&1 | tee -a $LOG_FILE
+    fi
+else
+    log "Warning: zsh not found - skipping shell configuration"
+fi
 
-#workspaces button.focused {
-    background: #64727D;
-    border-bottom: 3px solid white;
-}
+# Final summary
+log "Installation complete!"
+if [ -s $MISSING_PACKAGES_LOG ]; then
+    log "Some packages were not found in repositories:"
+    cat $MISSING_PACKAGES_LOG | tee -a $LOG_FILE
+    log "Check $MISSING_PACKAGES_LOG for missing packages to install manually"
+fi
 
-#workspaces button.urgent {
-    background-color: #eb4d4b;
-}
+log "Recommended next steps:"
+log "1. Restart your computer"
+log "2. Powerlevel10k will configure itself when you first open terminal"
+log "3. Set up Bluetooth with: blueman-manager"
+log "4. Configure rofi-lbon-wayland for app launcher"
+log "5. Configure gnome-keyring manually if needed"
 
-#custom-media {
-    min-width: 100px;
-    padding: 0 10px;
-    color: #7bc8a4;
-    background: #64727D;
-    border-radius: 5px;
-    margin: 0 5px;
-}
-
-#clock, #battery, #cpu, #memory, #network, #pulseaudio, #tray, #bluetooth, #backlight {
-    padding: 0 10px;
-    margin: 0 5px;
-}
-
-#battery.charging {
-    color: #26A65B;
-}
-
-#battery.warning:not(.charging) {
-    color: #f53c3c;
-}
-
-#battery.critical:not(.charging) {
-    background: #f53c3c;
-    color: white;
-    animation-name: blink;
-    animation-duration: 0.5s;
-    animation-timing-function: linear;
-    animation-iteration-count: infinite;
-    animation-direction: alternate;
-}
-
-#network.disconnected {
-    background: #f53c3c;
-}
-
-#pulseaudio.muted {
-    color: #f53c3c;
-}
-
-#tray {
-    background-color: #2980b9;
-}
-
-@keyframes blink {
-    to {
-        background-color: #ffffff;
-        color: black;
-    }
-}
-EOF
-
-# Kitty config
-mkdir -p ~/.config/kitty
-cat > ~/.config/kitty/kitty.conf << 'EOF'
-font_family JetBrainsMono Nerd Font
-font_size 12
-background_opacity 0.9
-EOF
-
-# Rofi config
-mkdir -p ~/.config/rofi
-cat > ~/.config/rofi/config.rasi << 'EOF'
-configuration {
-    modi: "drun";
-    icon-theme: "Papirus";
-    show-icons: true;
-    terminal: "kitty";
-    drun-display-format: "{icon} {name}";
-    location: 0;
-    disable-history: false;
-    sidebar-mode: false;
-}
-EOF
-
-# Refresh fonts
-fc-cache -fv
-
-echo -e "\n✅ All done! Reboot your system to start using Hyprland with Waybar and 12-hour clock format."
+log "Full installation log available at: $LOG_FILE"
